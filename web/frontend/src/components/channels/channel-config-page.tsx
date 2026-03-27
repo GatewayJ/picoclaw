@@ -122,6 +122,12 @@ function isConfigured(
   switch (channel.name) {
     case "telegram":
       return asString(config.token) !== ""
+    case "csgclaw":
+      return (
+        asString(config.base_url) !== "" &&
+        asString(config.bot_id) !== "" &&
+        asString(config.access_token) !== ""
+      )
     case "discord":
       return asString(config.token) !== ""
     case "slack":
@@ -172,6 +178,8 @@ function getRequiredFieldKeys(channelName: string): string[] {
   switch (channelName) {
     case "telegram":
       return ["token"]
+    case "csgclaw":
+      return ["base_url", "bot_id", "access_token"]
     case "discord":
       return ["token"]
     case "slack":
@@ -222,6 +230,7 @@ function getChannelDocSlug(channelName: string): string {
 
 const CHANNELS_WITHOUT_DOCS = new Set([
   "pico",
+  "csgclaw",
   "wecom",
   "matrix",
   "irc",

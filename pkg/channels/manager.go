@@ -357,6 +357,13 @@ func (m *Manager) initChannels(channels *config.ChannelsConfig) error {
 		m.initChannel("telegram", "Telegram")
 	}
 
+	if channels.CSGClaw.Enabled &&
+		channels.CSGClaw.BaseURL != "" &&
+		channels.CSGClaw.BotID != "" &&
+		channels.CSGClaw.AccessToken != "" {
+		m.initChannel("csgclaw", "CSGClaw")
+	}
+
 	if channels.WhatsApp.Enabled {
 		waCfg := channels.WhatsApp
 		if waCfg.UseNative {

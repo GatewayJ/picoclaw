@@ -1,4 +1,4 @@
-.PHONY: all build install uninstall clean help test
+.PHONY: all build install uninstall clean help test docker-image-build docker-image-push-ghcr
 
 # Build variables
 BINARY_NAME=picoclaw
@@ -13,6 +13,16 @@ BUILD_TIME=$(shell date +%FT%T%z)
 GO_VERSION=$(shell $(GO) version | awk '{print $$3}')
 CONFIG_PKG=github.com/sipeed/picoclaw/pkg/config
 LDFLAGS=-X $(CONFIG_PKG).Version=$(VERSION) -X $(CONFIG_PKG).GitCommit=$(GIT_COMMIT) -X $(CONFIG_PKG).BuildTime=$(BUILD_TIME) -X $(CONFIG_PKG).GoVersion=$(GO_VERSION) -s -w
+
+# Docker image variables
+DOCKERFILE?=docker/Dockerfile
+DOCKER_BUILD_CONTEXT?=.
+DOCKER_IMAGE_NAME?=$(BINARY_NAME)
+DOCKER_IMAGE_TAG?=2026.3.27
+DOCKER_IMAGE?=$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)
+GHCR_OWNER?=russellluo
+GHCR_IMAGE_NAME?=picoclaw
+GHCR_IMAGE?=ghcr.io/$(GHCR_OWNER)/$(GHCR_IMAGE_NAME):$(DOCKER_IMAGE_TAG)
 
 # Go variables
 GO?=CGO_ENABLED=0 go
@@ -286,6 +296,24 @@ docker-build:
 	@echo "Building minimal Docker image (Alpine-based)..."
 	docker compose -f docker/docker-compose.yml build picoclaw-agent picoclaw-gateway
 
+## docker-image-build: Build a local Docker image from docker/Dockerfile
+docker-image-build:
+	@echo "Building Docker image: $(DOCKER_IMAGE)"
+	docker build -f $(DOCKERFILE) -t $(DOCKER_IMAGE) $(DOCKER_BUILD_CONTEXT)
+
+## docker-image-push-ghcr: Tag the local image and push it to ghcr.io
+docker-image-push-ghcr: docker-image-build
+	@if [ -z "$(GHCR_OWNER)" ]; then \
+		echo "Error: GHCR_OWNER is required"; \
+		echo "Example: make docker-image-push-ghcr GHCR_OWNER=<github-user-or-org>"; \
+		exit 1; \
+	fi
+	@echo "Tagging Docker image: $(DOCKER_IMAGE) -> $(GHCR_IMAGE)"
+	docker tag $(DOCKER_IMAGE) $(GHCR_IMAGE)
+	@echo "Pushing Docker image to GHCR: $(GHCR_IMAGE)"
+	@echo "Make sure you have logged in first: echo <TOKEN> | docker login ghcr.io -u <USER> --password-stdin"
+	docker push $(GHCR_IMAGE)
+
 ## docker-build-full: Build Docker image with full MCP support (Node.js 24)
 docker-build-full:
 	@echo "Building full-featured Docker image (Node.js 24)..."
@@ -347,12 +375,16 @@ help:
 	@echo "  make uninstall          # Remove from /usr/local/bin"
 	@echo "  make install-skills     # Install skills to workspace"
 	@echo "  make docker-build       # Build minimal Docker image"
+	@echo "  make docker-image-build DOCKER_IMAGE=myrepo/picoclaw:dev"
+	@echo "  make docker-image-push-ghcr GHCR_OWNER=myorg"
 	@echo "  make docker-test        # Test MCP tools in Docker"
 	@echo ""
 	@echo "Environment Variables:"
 	@echo "  INSTALL_PREFIX          # Installation prefix (default: ~/.local)"
 	@echo "  WORKSPACE_DIR           # Workspace directory (default: ~/.picoclaw/workspace)"
 	@echo "  VERSION                 # Version string (default: git describe)"
+	@echo "  DOCKER_IMAGE            # Local Docker image tag (default: picoclaw:VERSION)"
+	@echo "  GHCR_OWNER              # GitHub user/org for ghcr.io push"
 	@echo ""
 	@echo "Current Configuration:"
 	@echo "  Platform: $(PLATFORM)/$(ARCH)"

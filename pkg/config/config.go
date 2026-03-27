@@ -354,6 +354,7 @@ func (d *AgentDefaults) GetModelName() string {
 type ChannelsConfig struct {
 	WhatsApp   WhatsAppConfig   `json:"whatsapp"`
 	Telegram   TelegramConfig   `json:"telegram"`
+	CSGClaw    CSGClawConfig    `json:"csgclaw"`
 	Feishu     FeishuConfig     `json:"feishu"`
 	Discord    DiscordConfig    `json:"discord"`
 	MaixCam    MaixCamConfig    `json:"maixcam"`
@@ -427,6 +428,16 @@ type TelegramConfig struct {
 	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_TELEGRAM_REASONING_CHANNEL_ID"`
 	UseMarkdownV2      bool                `json:"use_markdown_v2"         env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
 	secDirty           bool
+}
+
+type CSGClawConfig struct {
+	Enabled            bool                `json:"enabled"              env:"PICOCLAW_CHANNELS_CSGCLAW_ENABLED"`
+	BaseURL            string              `json:"base_url"             env:"PICOCLAW_CHANNELS_CSGCLAW_BASE_URL"`
+	BotID              string              `json:"bot_id"               env:"PICOCLAW_CHANNELS_CSGCLAW_BOT_ID"`
+	AccessToken        string              `json:"access_token"         env:"PICOCLAW_CHANNELS_CSGCLAW_ACCESS_TOKEN"`
+	AllowFrom          FlexibleStringSlice `json:"allow_from"           env:"PICOCLAW_CHANNELS_CSGCLAW_ALLOW_FROM"`
+	GroupTrigger       GroupTriggerConfig  `json:"group_trigger,omitempty"`
+	ReasoningChannelID string              `json:"reasoning_channel_id" env:"PICOCLAW_CHANNELS_CSGCLAW_REASONING_CHANNEL_ID"`
 }
 
 // Token returns the Telegram bot token

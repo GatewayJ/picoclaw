@@ -91,6 +91,17 @@
         "enabled": true
       }
     },
+    "csgclaw": {
+      "enabled": false,
+      "base_url": "http://127.0.0.1:18080",
+      "bot_id": "u-manager",
+      "access_token": "YOUR_CSGCLAW_ACCESS_TOKEN",
+      "allow_from": [],
+      "group_trigger": {
+        "mention_only": true
+      },
+      "reasoning_channel_id": ""
+    },
     "discord": {
       "enabled": false,
       "token": "YOUR_DISCORD_BOT_TOKEN",
