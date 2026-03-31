@@ -232,30 +232,26 @@ func saveSecurityConfig(securityPath string, sec *SecurityConfig) error {
 // mergeSecurityConfig merges two SecurityConfig instances, preferring non-empty values from 'newer'.
 // This is used during config migration to preserve existing security data while adding new entries.
 func mergeSecurityConfig(existing, newer *SecurityConfig) *SecurityConfig {
-	if existing == nil {
-		return normalizeSecurityConfig(newer)
-	}
-	if newer == nil {
-		return normalizeSecurityConfig(existing)
-	}
-
 	result := normalizeSecurityConfig(nil)
-
-	// Merge ModelList: prefer newer if it has keys, otherwise use existing
-	for k, v := range existing.ModelList {
-		result.ModelList[k] = v
-	}
-	for k, v := range newer.ModelList {
-		if len(v.APIKeys) > 0 {
+	if existing != nil {
+		// Merge ModelList: prefer newer if it has keys, otherwise use existing
+		for k, v := range existing.ModelList {
 			result.ModelList[k] = v
+		}
+	}
+	if newer != nil {
+		for k, v := range newer.ModelList {
+			if len(v.APIKeys) > 0 {
+				result.ModelList[k] = v
+			}
 		}
 	}
 
 	// Merge Channels
-	if existing.Channels != nil {
+	if existing != nil && existing.Channels != nil {
 		result.Channels = existing.Channels
 	}
-	if newer.Channels != nil {
+	if newer != nil && newer.Channels != nil {
 		if result.Channels == nil {
 			result.Channels = &ChannelsSecurity{}
 		}
@@ -263,10 +259,10 @@ func mergeSecurityConfig(existing, newer *SecurityConfig) *SecurityConfig {
 	}
 
 	// Merge Web
-	if existing.Web != nil {
+	if existing != nil && existing.Web != nil {
 		result.Web = existing.Web
 	}
-	if newer.Web != nil {
+	if newer != nil && newer.Web != nil {
 		if result.Web == nil {
 			result.Web = &WebToolsSecurity{}
 		}
@@ -274,10 +270,10 @@ func mergeSecurityConfig(existing, newer *SecurityConfig) *SecurityConfig {
 	}
 
 	// Merge Skills
-	if existing.Skills != nil {
+	if existing != nil && existing.Skills != nil {
 		result.Skills = existing.Skills
 	}
-	if newer.Skills != nil {
+	if newer != nil && newer.Skills != nil {
 		if result.Skills == nil {
 			result.Skills = &SkillsSecurity{}
 		}

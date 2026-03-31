@@ -1280,7 +1280,9 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			logger.WarnF("config file not found, using default config", map[string]any{"path": path})
-			return DefaultConfig(), nil
+			cfg := DefaultConfig()
+			applyCustomModelDefaults(cfg)
+			return cfg, nil
 		}
 		logger.Errorf("failed to read config file: %v", err)
 		return nil, err
@@ -1295,7 +1297,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if len(data) <= 10 {
 		logger.Warn(fmt.Sprintf("content is [%s]", string(data)))
-		return DefaultConfig().WithSecurity(&SecurityConfig{}), nil
+		cfg := DefaultConfig().WithSecurity(&SecurityConfig{})
+		applyCustomModelDefaults(cfg)
+		return cfg, nil
 	}
 
 	// Load config based on detected version
@@ -1367,6 +1371,8 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("unsupported config version: %d", versionInfo.Version)
 	}
 
+	applyCustomModelDefaults(cfg)
+
 	if passphrase := credential.PassphraseProvider(); passphrase != "" {
 		for _, m := range cfg.ModelList {
 			for _, k := range m.apiKeys {
@@ -1416,6 +1422,39 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func applyCustomModelDefaults(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+
+	customModelName := strings.TrimSpace(os.Getenv("PICOCLAW_CUSTOM_MODEL_NAME"))
+	customModelID := strings.TrimSpace(os.Getenv("PICOCLAW_CUSTOM_MODEL_ID"))
+	customModelAPIKey := strings.TrimSpace(os.Getenv("PICOCLAW_CUSTOM_MODEL_API_KEY"))
+	customModelBaseURL := strings.TrimSpace(os.Getenv("PICOCLAW_CUSTOM_MODEL_BASE_URL"))
+
+	if customModelID == "" || customModelAPIKey == "" {
+		return
+	}
+	if customModelName == "" {
+		customModelName = customModelID
+	}
+
+	for _, model := range cfg.ModelList {
+		if model != nil && model.ModelName == customModelName {
+			return
+		}
+	}
+
+	customModel := &ModelConfig{
+		ModelName: customModelName,
+		Model:     buildModelWithProtocol("openai", customModelID),
+		APIBase:   customModelBaseURL,
+	}
+	customModel.SetAPIKey(customModelAPIKey)
+
+	cfg.ModelList = append([]*ModelConfig{customModel}, cfg.ModelList...)
 }
 
 func makeBackup(path string) error {

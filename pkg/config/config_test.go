@@ -1031,6 +1031,36 @@ func TestLoadConfig_NoSealWithoutPassphrase(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_CustomModelDefaultsFromEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	data := `{"version":1}`
+	if err := os.WriteFile(cfgPath, []byte(data), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	t.Setenv("PICOCLAW_CUSTOM_MODEL_NAME", "custom-model")
+	t.Setenv("PICOCLAW_CUSTOM_MODEL_ID", "my-custom-model")
+	t.Setenv("PICOCLAW_CUSTOM_MODEL_API_KEY", "sk-custom")
+	t.Setenv("PICOCLAW_CUSTOM_MODEL_BASE_URL", "https://example.com/v1")
+	t.Setenv("PICOCLAW_KEY_PASSPHRASE", "")
+	t.Setenv("PICOCLAW_SSH_KEY_PATH", "")
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.ModelList) == 0 {
+		t.Fatal("LoadConfig should prepend a custom model entry")
+	}
+
+	got := cfg.ModelList[0]
+	assert.Equal(t, "custom-model", got.ModelName)
+	assert.Equal(t, "openai/my-custom-model", got.Model)
+	assert.Equal(t, "https://example.com/v1", got.APIBase)
+	assert.Equal(t, "sk-custom", got.APIKey())
+}
+
 // TestLoadConfig_FileRefNotSealed verifies that file:// api_key references are not
 // converted to enc:// values (they are resolved at runtime by the Resolver).
 func TestLoadConfig_FileRefNotSealed(t *testing.T) {
