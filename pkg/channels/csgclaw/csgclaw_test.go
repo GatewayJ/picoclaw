@@ -40,7 +40,7 @@ func TestChannelReconnectsSSEWithBackoff(t *testing.T) {
 				t.Fatal("response writer does not implement http.Flusher")
 			}
 
-			payload := fmt.Sprintf(`{"message_id":"msg-%d","chat_id":"chat-1","chat_type":"direct","sender":{"id":"user-1","username":"alice","display_name":"Alice"},"text":"hello-%d","timestamp":"2026-03-26T00:00:00Z"}`, attempt, attempt)
+			payload := fmt.Sprintf(`{"message_id":"msg-%d","chat_id":"chat-1","chat_type":"direct","sender":{"id":"user-1","username":"alice","display_name":"Alice"},"text":"@test-bot hello-%d","timestamp":"2026-03-26T00:00:00Z"}`, attempt, attempt)
 			_, _ = fmt.Fprintf(w, "event: message\n")
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 			flusher.Flush()
@@ -95,23 +95,65 @@ func TestChannelReconnectsSSEWithBackoff(t *testing.T) {
 func TestStripInboundMentionPrefix(t *testing.T) {
 	tests := []struct {
 		name    string
+		botID   string
 		content string
 		want    string
+		ok      bool
 	}{
-		{name: "space separated prefix", content: "@manager good day, isn't it", want: "good day, isn't it"},
-		{name: "colon separated prefix", content: "@alice: hello", want: "hello"},
-		{name: "full width separators", content: "＠小助理：你好", want: "你好"},
-		{name: "comma separated prefix", content: "@bob, hello", want: "hello"},
-		{name: "not at start", content: "hello @manager", want: "hello @manager"},
-		{name: "no prefix", content: "hello", want: "hello"},
+		{name: "space separated prefix", botID: "u-manager", content: "@manager good day, isn't it", want: "good day, isn't it", ok: true},
+		{name: "full bot id also matches", botID: "u-manager", content: "@u-manager hello", want: "hello", ok: true},
+		{name: "colon separated prefix", botID: "alice", content: "@alice: hello", want: "hello", ok: true},
+		{name: "full width separators", botID: "小助理", content: "＠小助理：你好", want: "你好", ok: true},
+		{name: "comma separated prefix", botID: "bob", content: "@bob, hello", want: "hello", ok: true},
+		{name: "other mention ignored", botID: "u-manager", content: "@alice hello", want: "", ok: false},
+		{name: "not at start ignored", botID: "u-manager", content: "hello @manager", want: "", ok: false},
+		{name: "no prefix ignored", botID: "u-manager", content: "hello", want: "", ok: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := stripInboundMentionPrefix(tt.content); got != tt.want {
-				t.Fatalf("stripInboundMentionPrefix(%q) = %q, want %q", tt.content, got, tt.want)
+			got, ok := stripInboundMentionPrefix(tt.content, tt.botID)
+			if ok != tt.ok {
+				t.Fatalf("stripInboundMentionPrefix(%q, %q) ok = %v, want %v", tt.content, tt.botID, ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("stripInboundMentionPrefix(%q, %q) = %q, want %q", tt.content, tt.botID, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHandleInboundEventIgnoresNonBotMentions(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	ch, err := NewChannel(config.CSGClawConfig{
+		BaseURL:     "http://127.0.0.1:18080",
+		BotID:       "u-manager",
+		AccessToken: "secret",
+	}, mb)
+	if err != nil {
+		t.Fatalf("NewChannel() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch.ctx = ctx
+
+	ch.handleInboundEvent(eventPayload{
+		MessageID: "msg-1",
+		ChatID:    "chat-1",
+		ChatType:  "direct",
+		Sender: sender{
+			ID: "user-1",
+		},
+		Text: "@alice hello",
+	})
+
+	select {
+	case msg := <-mb.InboundChan():
+		t.Fatalf("unexpected inbound message published: %+v", msg)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 

@@ -29,7 +29,7 @@ const (
 var (
 	sseReconnectInitialBackoff = 1 * time.Second
 	sseReconnectMaxBackoff     = 30 * time.Second
-	inboundMentionPrefixRe     = regexp.MustCompile(`^[＠@][^\s:：,，]+(?:[\s]+|[:：,，]\s*)`)
+	inboundMentionPrefixRe     = regexp.MustCompile(`^[＠@]([^\s:：,，]+)(?:[\s]+|[:：,，]\s*)`)
 )
 
 type Channel struct {
@@ -322,8 +322,13 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 		return
 	}
 
+	fmt.Printf("evt: %+v\n", evt)
+
 	peerKind := "direct"
-	content := stripInboundMentionPrefix(strings.TrimSpace(evt.Text))
+	content, ok := stripInboundMentionPrefix(strings.TrimSpace(evt.Text), c.config.BotID)
+	if !ok {
+		return
+	}
 	if strings.EqualFold(evt.ChatType, "group") {
 		peerKind = "group"
 		shouldRespond, normalized := c.ShouldRespondInGroup(true, content)
@@ -362,12 +367,48 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 	)
 }
 
-func stripInboundMentionPrefix(content string) string {
+func stripInboundMentionPrefix(content, botID string) (string, bool) {
 	content = strings.TrimSpace(content)
-	if !inboundMentionPrefixRe.MatchString(content) {
-		return content
+	match := inboundMentionPrefixRe.FindStringSubmatch(content)
+	if len(match) != 2 {
+		return "", false
 	}
-	return strings.TrimSpace(inboundMentionPrefixRe.ReplaceAllString(content, ""))
+
+	if !isInboundMentionForBot(match[1], botID) {
+		return "", false
+	}
+
+	return strings.TrimSpace(inboundMentionPrefixRe.ReplaceAllString(content, "")), true
+}
+
+func isInboundMentionForBot(mentionName, botID string) bool {
+	mentionName = normalizeInboundMentionName(mentionName)
+	for _, candidate := range inboundBotMentionNames(botID) {
+		if mentionName == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func inboundBotMentionNames(botID string) []string {
+	botID = strings.TrimSpace(botID)
+	if botID == "" {
+		return nil
+	}
+
+	names := []string{normalizeInboundMentionName(botID)}
+	if rest, ok := strings.CutPrefix(botID, "u-"); ok && strings.TrimSpace(rest) != "" {
+		names = append(names, normalizeInboundMentionName(rest))
+	}
+	if rest, ok := strings.CutPrefix(botID, "u_"); ok && strings.TrimSpace(rest) != "" {
+		names = append(names, normalizeInboundMentionName(rest))
+	}
+	return names
+}
+
+func normalizeInboundMentionName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func (c *Channel) closeEventStream() {
