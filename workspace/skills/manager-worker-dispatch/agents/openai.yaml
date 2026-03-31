@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manager Worker Dispatch"
+  short_description: "Dispatch tasks to workers via API"
+  default_prompt: "Use $manager-worker-dispatch to inspect workers, create missing roles, add them to the conversation, and assign tasks."

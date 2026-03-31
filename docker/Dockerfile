@@ -20,7 +20,7 @@ RUN make build
 # ============================================================
 FROM alpine:3.23
 
-RUN apk add --no-cache ca-certificates tzdata curl
+RUN apk add --no-cache ca-certificates curl python3 tini tzdata
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
@@ -37,7 +37,12 @@ RUN addgroup -g 1000 picoclaw && \
 USER picoclaw
 
 # Run onboard to create initial directories and config
-RUN /usr/local/bin/picoclaw onboard
+RUN /usr/local/bin/picoclaw onboard && \
+    find /home/picoclaw/.picoclaw/workspace/skills -mindepth 1 -maxdepth 1 \
+      ! -name 'manager-worker-dispatch' -exec rm -rf {} +
 
-ENTRYPOINT ["picoclaw"]
-CMD ["gateway"]
+# Bundle the default config into the image
+COPY --chown=picoclaw:picoclaw docker/config/config.json /home/picoclaw/.picoclaw/config.json
+
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["picoclaw", "gateway", "-d"]

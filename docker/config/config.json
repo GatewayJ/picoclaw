@@ -1,0 +1,241 @@
+{
+  "agents": {
+    "defaults": {
+      "allow_read_outside_workspace": true,
+      "max_tokens": 32768,
+      "max_tool_iterations": 50,
+      "model_name": "default-minimax-m2.7",
+      "provider": "",
+      "restrict_to_workspace": false,
+      "steering_mode": "one-at-a-time",
+      "subturn": {
+        "concurrency_timeout_sec": 0,
+        "default_timeout_minutes": 0,
+        "default_token_budget": 0,
+        "max_concurrent": 0,
+        "max_depth": 0
+      },
+      "summarize_message_threshold": 20,
+      "summarize_token_percent": 75,
+      "tool_feedback": {
+        "enabled": true,
+        "max_args_length": 300
+      },
+      "workspace": "~/.picoclaw/workspace"
+    }
+  },
+  "build_info": {
+    "build_time": "",
+    "git_commit": "",
+    "go_version": "",
+    "version": "nightly-231-g74a9dca"
+  },
+  "channels": {
+    "csgclaw": {
+      "access_token": "your_access_token",
+      "allow_from": [],
+      "base_url": "http://127.0.0.1:18080",
+      "bot_id": "u-bot",
+      "enabled": true,
+      "group_trigger": {
+        "mention_only": true
+      },
+      "reasoning_channel_id": ""
+    },
+    "matrix": {
+      "allow_from": [],
+      "crypto_passphrase": "",
+      "enabled": false,
+      "group_trigger": {
+        "mention_only": true
+      },
+      "homeserver": "",
+      "join_on_invite": true,
+      "placeholder": {
+        "enabled": true,
+        "text": [
+          "Thinking... 💭"
+        ]
+      },
+      "reasoning_channel_id": "",
+      "user_id": ""
+    }
+  },
+  "devices": {
+    "enabled": false,
+    "monitor_usb": true
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "hot_reload": false,
+    "log_level": "fatal",
+    "port": 18790
+  },
+  "heartbeat": {
+    "enabled": true,
+    "interval": 30
+  },
+  "hooks": {
+    "defaults": {
+      "approval_timeout_ms": 60000,
+      "interceptor_timeout_ms": 5000,
+      "observer_timeout_ms": 500
+    },
+    "enabled": true
+  },
+  "model_list": [
+    {
+      "api_base": "http://127.0.0.1:4000",
+      "api_key": "sk-1234567890",
+      "model": "default-minimax-m2.7",
+      "model_name": "default-minimax-m2.7"
+    }
+  ],
+  "session": {
+    "dm_scope": "per-channel-peer"
+  },
+  "tools": {
+    "allow_read_paths": null,
+    "allow_write_paths": null,
+    "append_file": {
+      "enabled": true
+    },
+    "cron": {
+      "allow_command": true,
+      "enabled": true,
+      "exec_timeout_minutes": 5
+    },
+    "edit_file": {
+      "enabled": true
+    },
+    "exec": {
+      "allow_remote": true,
+      "custom_allow_patterns": null,
+      "custom_deny_patterns": null,
+      "enable_deny_patterns": true,
+      "enabled": true,
+      "timeout_seconds": 60
+    },
+    "filter_min_length": 8,
+    "filter_sensitive_data": true,
+    "find_skills": {
+      "enabled": true
+    },
+    "i2c": {
+      "enabled": false
+    },
+    "install_skill": {
+      "enabled": true
+    },
+    "list_dir": {
+      "enabled": true
+    },
+    "mcp": {
+      "discovery": {
+        "enabled": false,
+        "max_search_results": 5,
+        "ttl": 5,
+        "use_bm25": true,
+        "use_regex": false
+      },
+      "enabled": false
+    },
+    "media_cleanup": {
+      "enabled": true,
+      "interval_minutes": 5,
+      "max_age_minutes": 30
+    },
+    "message": {
+      "enabled": true
+    },
+    "read_file": {
+      "enabled": true,
+      "max_read_file_size": 65536
+    },
+    "send_file": {
+      "enabled": true
+    },
+    "skills": {
+      "enabled": true,
+      "github": {},
+      "max_concurrent_searches": 2,
+      "registries": {
+        "clawhub": {
+          "base_url": "https://clawhub.ai",
+          "download_path": "",
+          "enabled": true,
+          "max_response_size": 0,
+          "max_zip_size": 0,
+          "search_path": "",
+          "skills_path": "",
+          "timeout": 0
+        }
+      },
+      "search_cache": {
+        "max_size": 50,
+        "ttl_seconds": 300
+      }
+    },
+    "spawn": {
+      "enabled": true
+    },
+    "spawn_status": {
+      "enabled": false
+    },
+    "spi": {
+      "enabled": false
+    },
+    "subagent": {
+      "enabled": true
+    },
+    "web": {
+      "baidu_search": {
+        "base_url": "",
+        "enabled": false,
+        "max_results": 0
+      },
+      "brave": {
+        "enabled": false,
+        "max_results": 5
+      },
+      "duckduckgo": {
+        "enabled": true,
+        "max_results": 5
+      },
+      "enabled": true,
+      "fetch_limit_bytes": 10485760,
+      "format": "plaintext",
+      "glm_search": {
+        "base_url": "https://open.bigmodel.cn/api/paas/v4/web_search",
+        "enabled": false,
+        "max_results": 0,
+        "search_engine": "search_std"
+      },
+      "perplexity": {
+        "enabled": false,
+        "max_results": 5
+      },
+      "prefer_native": true,
+      "searxng": {
+        "base_url": "",
+        "enabled": false,
+        "max_results": 5
+      },
+      "tavily": {
+        "base_url": "",
+        "enabled": false,
+        "max_results": 5
+      }
+    },
+    "web_fetch": {
+      "enabled": true
+    },
+    "write_file": {
+      "enabled": true
+    }
+  },
+  "version": 1,
+  "voice": {
+    "echo_transcription": false
+  }
+}
