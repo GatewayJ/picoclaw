@@ -1,0 +1,9 @@
+model_list:
+  {{ quote .ModelName }}:
+    api_keys:
+{{- range .APIKeys }}
+      - {{ quote . }}
+{{- end }}
+channels: {}
+web: {}
+skills: {}

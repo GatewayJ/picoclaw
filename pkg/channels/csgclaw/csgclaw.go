@@ -46,7 +46,7 @@ type Channel struct {
 
 type eventPayload struct {
 	MessageID string   `json:"message_id"`
-	ChatID    string   `json:"chat_id"`
+	RoomID    string   `json:"room_id"`
 	ChatType  string   `json:"chat_type"`
 	Sender    sender   `json:"sender"`
 	Text      string   `json:"text"`
@@ -61,7 +61,7 @@ type sender struct {
 }
 
 type sendRequest struct {
-	ChatID string `json:"chat_id"`
+	RoomID string `json:"room_id"`
 	Text   string `json:"text"`
 }
 
@@ -126,7 +126,9 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	if !c.IsRunning() {
 		return channels.ErrNotRunning
 	}
-	if strings.TrimSpace(msg.ChatID) == "" {
+	fmt.Printf("received msg: %+v\n", msg)
+	roomID := msg.ChatID
+	if strings.TrimSpace(roomID) == "" {
 		return fmt.Errorf("csgclaw chat ID is empty: %w", channels.ErrSendFailed)
 	}
 	if strings.TrimSpace(msg.Content) == "" {
@@ -134,7 +136,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	}
 
 	body, err := json.Marshal(sendRequest{
-		ChatID: msg.ChatID,
+		RoomID: roomID,
 		Text:   msg.Content,
 	})
 	if err != nil {
@@ -149,7 +151,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	req.Header.Set("Content-Type", "application/json")
 
 	logger.InfoCF("csgclaw", "Sending outbound message", map[string]any{
-		"chat_id":      msg.ChatID,
+		"room_id":      roomID,
 		"content_len":  len(msg.Content),
 		"endpoint_url": c.sendURL(),
 	})
@@ -170,7 +172,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	}
 
 	logger.InfoCF("csgclaw", "Outbound message sent", map[string]any{
-		"chat_id":       msg.ChatID,
+		"room_id":       roomID,
 		"status_code":   resp.StatusCode,
 		"response_body": strings.TrimSpace(string(rawBody)),
 	})
@@ -318,11 +320,9 @@ func (c *Channel) dispatchEvent(eventType, raw string) {
 }
 
 func (c *Channel) handleInboundEvent(evt eventPayload) {
-	if strings.TrimSpace(evt.ChatID) == "" || strings.TrimSpace(evt.Sender.ID) == "" {
+	if strings.TrimSpace(evt.RoomID) == "" || strings.TrimSpace(evt.Sender.ID) == "" {
 		return
 	}
-
-	fmt.Printf("evt: %+v\n", evt)
 
 	peerKind := "direct"
 	content, ok := stripInboundMentionPrefix(strings.TrimSpace(evt.Text), c.config.BotID)
@@ -356,10 +356,10 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 
 	c.HandleMessage(
 		c.ctx,
-		bus.Peer{Kind: peerKind, ID: evt.ChatID},
+		bus.Peer{Kind: peerKind, ID: evt.RoomID},
 		evt.MessageID,
 		evt.Sender.ID,
-		evt.ChatID,
+		evt.RoomID,
 		content,
 		nil,
 		metadata,

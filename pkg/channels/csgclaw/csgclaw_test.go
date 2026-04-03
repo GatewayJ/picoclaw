@@ -40,7 +40,7 @@ func TestChannelReconnectsSSEWithBackoff(t *testing.T) {
 				t.Fatal("response writer does not implement http.Flusher")
 			}
 
-			payload := fmt.Sprintf(`{"message_id":"msg-%d","chat_id":"chat-1","chat_type":"direct","sender":{"id":"user-1","username":"alice","display_name":"Alice"},"text":"@test-bot hello-%d","timestamp":"2026-03-26T00:00:00Z"}`, attempt, attempt)
+			payload := fmt.Sprintf(`{"message_id":"msg-%d","room_id":"room-1","chat_type":"direct","sender":{"id":"user-1","username":"alice","display_name":"Alice"},"text":"@test-bot hello-%d","timestamp":"2026-03-26T00:00:00Z"}`, attempt, attempt)
 			_, _ = fmt.Fprintf(w, "event: message\n")
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 			flusher.Flush()
@@ -142,7 +142,7 @@ func TestHandleInboundEventIgnoresNonBotMentions(t *testing.T) {
 
 	ch.handleInboundEvent(eventPayload{
 		MessageID: "msg-1",
-		ChatID:    "chat-1",
+		RoomID:    "room-1",
 		ChatType:  "direct",
 		Sender: sender{
 			ID: "user-1",
@@ -154,6 +154,46 @@ func TestHandleInboundEventIgnoresNonBotMentions(t *testing.T) {
 	case msg := <-mb.InboundChan():
 		t.Fatalf("unexpected inbound message published: %+v", msg)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHandleInboundEventConsumesRoomIDPayload(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	ch, err := NewChannel(config.CSGClawConfig{
+		BaseURL:     "http://127.0.0.1:18080",
+		BotID:       "u-manager",
+		AccessToken: "secret",
+	}, mb)
+	if err != nil {
+		t.Fatalf("NewChannel() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch.ctx = ctx
+
+	ch.handleInboundEvent(eventPayload{
+		MessageID: "msg-1",
+		RoomID:    "room-1",
+		ChatType:  "direct",
+		Sender: sender{
+			ID: "user-1",
+		},
+		Text: "@manager hi",
+	})
+
+	select {
+	case msg := <-mb.InboundChan():
+		if msg.ChatID != "room-1" {
+			t.Fatalf("inbound chat ID = %q, want %q", msg.ChatID, "room-1")
+		}
+		if msg.Content != "hi" {
+			t.Fatalf("inbound content = %q, want %q", msg.Content, "hi")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("timed out waiting for inbound message")
 	}
 }
 
