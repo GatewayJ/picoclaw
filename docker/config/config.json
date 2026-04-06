@@ -146,7 +146,7 @@
       "max_age_minutes": 30
     },
     "message": {
-      "enabled": true
+      "enabled": false
     },
     "read_file": {
       "enabled": true,

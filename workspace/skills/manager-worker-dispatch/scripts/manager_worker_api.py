@@ -128,16 +128,16 @@ class CSGClawAPI:
             payload["model_id"] = model_id
         return self.request_json("POST", "/api/v1/workers", payload)
 
-    def join_agent_to_conversation(
+    def join_agent_to_room(
         self,
         agent_id: str,
-        conversation_id: str,
+        room_id: str,
         inviter_id: str | None,
         locale: str | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "agent_id": agent_id,
-            "conversation_id": conversation_id,
+            "room_id": room_id,
         }
         if inviter_id:
             payload["inviter_id"] = inviter_id
@@ -145,11 +145,11 @@ class CSGClawAPI:
             payload["locale"] = locale
         return self.request_json("POST", "/api/v1/im/agents/join", payload)
 
-    def send_bot_message(self, bot_id: str, chat_id: str, text: str) -> dict[str, Any]:
+    def send_bot_message(self, bot_id: str, room_id: str, text: str) -> dict[str, Any]:
         return self.request_json(
             "POST",
             f"/api/bots/{bot_id}/messages/send",
-            {"chat_id": chat_id, "text": text},
+            {"room_id": room_id, "text": text},
         )
 
 
@@ -246,14 +246,14 @@ def cmd_create_worker(args: argparse.Namespace) -> int:
 
 def cmd_join_worker(args: argparse.Namespace) -> int:
     api = load_api(args)
-    result = api.join_agent_to_conversation(args.worker_id, args.conversation_id, args.inviter_id, args.locale)
+    result = api.join_agent_to_room(args.worker_id, args.room_id, args.inviter_id, args.locale)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_send_message(args: argparse.Namespace) -> int:
     api = load_api(args)
-    result = api.send_bot_message(args.bot_id, args.chat_id, args.text)
+    result = api.send_bot_message(args.bot_id, args.room_id, args.text)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
@@ -270,8 +270,8 @@ def cmd_ensure_and_dispatch(args: argparse.Namespace) -> int:
 
     result = {
         "worker": worker,
-        "join": api.join_agent_to_conversation(worker_id, args.conversation_id, args.inviter_id, args.locale),
-        "message": api.send_bot_message(args.bot_id, args.conversation_id, text),
+        "join": api.join_agent_to_room(worker_id, args.room_id, args.inviter_id, args.locale),
+        "message": api.send_bot_message(args.bot_id, args.room_id, text),
         "text": text,
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -297,28 +297,28 @@ def build_parser() -> argparse.ArgumentParser:
     create_worker.add_argument("--model-id", help="Optional model id.")
     create_worker.set_defaults(func=cmd_create_worker)
 
-    join_worker = subparsers.add_parser("join-worker", help="Join a worker to a conversation.")
+    join_worker = subparsers.add_parser("join-worker", help="Join a worker to a room.")
     add_common_args(join_worker)
-    join_worker.add_argument("--conversation-id", required=True, help="Conversation id.")
+    join_worker.add_argument("--room-id", required=True, help="Room id.")
     join_worker.add_argument("--worker-id", required=True, help="Worker agent id.")
-    join_worker.add_argument("--inviter-id", default="u-admin", help="Inviter id. Default: u-admin.")
+    join_worker.add_argument("--inviter-id", default="u-manager", help="Inviter id. Default: u-manager.")
     join_worker.add_argument("--locale", help="Optional locale, for example zh-CN.")
     join_worker.set_defaults(func=cmd_join_worker)
 
-    send_message = subparsers.add_parser("send-message", help="Send a bot message to a conversation.")
+    send_message = subparsers.add_parser("send-message", help="Send a bot message to a room.")
     add_common_args(send_message)
-    send_message.add_argument("--bot-id", required=True, help="Bot id used as message sender.")
-    send_message.add_argument("--chat-id", required=True, help="Conversation id.")
+    send_message.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
+    send_message.add_argument("--room-id", required=True, help="Room id.")
     send_message.add_argument("--text", required=True, help="Message text.")
     send_message.set_defaults(func=cmd_send_message)
 
     ensure_dispatch = subparsers.add_parser(
         "ensure-and-dispatch",
-        help="Find or create a worker by description, join the conversation, then send a mention message by bot.",
+        help="Find or create a worker by description, join the room, then send a mention message by bot.",
     )
     add_common_args(ensure_dispatch)
-    ensure_dispatch.add_argument("--conversation-id", required=True, help="Conversation id.")
-    ensure_dispatch.add_argument("--bot-id", required=True, help="Bot id used as message sender.")
+    ensure_dispatch.add_argument("--room-id", required=True, help="Room id.")
+    ensure_dispatch.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
     ensure_dispatch.add_argument("--role", default="worker", help="Worker role when creating. Default: worker.")
     ensure_dispatch.add_argument("--name", required=True, help="Worker name if creation is needed.")
     ensure_dispatch.add_argument("--task", required=True, help="Task description.")
@@ -326,7 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
     ensure_dispatch.add_argument("--id", help="Optional worker id when creating.")
     ensure_dispatch.add_argument("--description", required=True, help="Worker capability description used for matching and creation.")
     ensure_dispatch.add_argument("--model-id", help="Optional model id when creating.")
-    ensure_dispatch.add_argument("--inviter-id", default="u-admin", help="Inviter id. Default: u-admin.")
+    ensure_dispatch.add_argument("--inviter-id", default="u-manager", help="Inviter id. Default: u-manager.")
     ensure_dispatch.add_argument("--locale", help="Optional locale, for example zh-CN.")
     ensure_dispatch.set_defaults(func=cmd_ensure_and_dispatch)
 

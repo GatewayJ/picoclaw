@@ -2,6 +2,8 @@
 
 This skill follows the actual routes described in `docs/api.md`.
 
+The skill and CLI use `room` as the user-facing term. Where the underlying HTTP API still uses a legacy field name, the contract notes the mapping explicitly.
+
 ## Environment Variables
 
 - `CSGCLAW_BASE_URL`: Preferred when the script runs inside a CSGClaw box.
@@ -55,7 +57,7 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
 }
 ```
 
-### Join worker to conversation
+### Join worker to room
 
 - Method: `POST`
 - Path: `/api/v1/im/agents/join`
@@ -64,7 +66,7 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
 ```json
 {
   "agent_id": "u-alex",
-  "conversation_id": "room-123",
+  "room_id": "room-123",
   "inviter_id": "u-admin",
   "locale": "zh-CN"
 }
@@ -78,7 +80,7 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
 
 ```json
 {
-  "chat_id": "room-123",
+  "room_id": "room-123",
   "text": "@bob 你来写前端代码，实现设置页 UI"
 }
 ```
@@ -86,5 +88,5 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
 ## Notes
 
 - There is no dedicated task-assignment API.
-- Dispatch means sending a normal bot message in the target conversation and mentioning the worker.
-- `ensure-and-dispatch` performs: list workers, create if missing, join conversation, send message.
+- Dispatch means sending a normal bot message in the target room and mentioning the worker.
+- `ensure-and-dispatch` performs: list workers, create if missing, join room, send message.
