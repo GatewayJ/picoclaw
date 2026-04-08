@@ -9,10 +9,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
@@ -29,7 +30,6 @@ const (
 var (
 	sseReconnectInitialBackoff = 1 * time.Second
 	sseReconnectMaxBackoff     = 30 * time.Second
-	inboundMentionPrefixRe     = regexp.MustCompile(`^[＠@]([^\s:：,，]+)(?:[\s]+|[:：,，]\s*)`)
 )
 
 type Channel struct {
@@ -325,8 +325,8 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 	}
 
 	peerKind := "direct"
-	content, ok := stripInboundMentionPrefix(strings.TrimSpace(evt.Text), c.config.BotID)
-	if !ok {
+	content := strings.TrimSpace(evt.Text)
+	if !isFirstInboundBotMentionSelf(content, c.config.BotID) {
 		return
 	}
 	if strings.EqualFold(evt.ChatType, "group") {
@@ -367,28 +367,67 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 	)
 }
 
-func stripInboundMentionPrefix(content, botID string) (string, bool) {
+func isFirstInboundBotMentionSelf(content, botID string) bool {
 	content = strings.TrimSpace(content)
-	match := inboundMentionPrefixRe.FindStringSubmatch(content)
-	if len(match) != 2 {
-		return "", false
+	if content == "" {
+		return false
 	}
 
-	if !isInboundMentionForBot(match[1], botID) {
-		return "", false
+	atIndex, mentionName := firstInboundMention(content)
+	if atIndex < 0 || mentionName == "" {
+		return false
 	}
 
-	return strings.TrimSpace(inboundMentionPrefixRe.ReplaceAllString(content, "")), true
-}
-
-func isInboundMentionForBot(mentionName, botID string) bool {
-	mentionName = normalizeInboundMentionName(mentionName)
 	for _, candidate := range inboundBotMentionNames(botID) {
-		if mentionName == candidate {
+		if candidate != "" && strings.EqualFold(mentionName, candidate) {
 			return true
 		}
 	}
 	return false
+}
+
+func firstInboundMention(content string) (int, string) {
+	prev := rune(0)
+	for i, r := range content {
+		if r != '@' && r != '＠' {
+			prev = r
+			continue
+		}
+
+		if !isInboundMentionLeftBoundary(prev) {
+			prev = r
+			continue
+		}
+
+		start := i + utf8.RuneLen(r)
+		if start >= len(content) {
+			return -1, ""
+		}
+
+		first, size := utf8.DecodeRuneInString(content[start:])
+		if !isInboundMentionIdentifierRune(first) {
+			return -1, ""
+		}
+
+		end := start + size
+		for end < len(content) {
+			next, nextSize := utf8.DecodeRuneInString(content[end:])
+			if !isInboundMentionIdentifierRune(next) {
+				break
+			}
+			end += nextSize
+		}
+		return i, strings.TrimSpace(content[start:end])
+	}
+	return -1, ""
+}
+
+func isInboundMentionLeftBoundary(r rune) bool {
+	return r == 0 || !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.')
+}
+
+func isInboundMentionIdentifierRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-'
 }
 
 func inboundBotMentionNames(botID string) []string {

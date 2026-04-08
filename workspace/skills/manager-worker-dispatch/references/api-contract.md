@@ -88,5 +88,8 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
 ## Notes
 
 - There is no dedicated task-assignment API.
-- Dispatch means sending a normal bot message in the target room and mentioning the worker.
-- `ensure-and-dispatch` performs: list workers, create if missing, join room, send message.
+- Dispatch still means sending a normal bot message in the target room and mentioning the worker.
+- Each task in `todo.json` should carry an `id` task number, increasing in dispatch order such as `1`, `2`, `3`.
+- `start-tracking` watches `todo.json`, finds the first task whose `passes` is not `true`, and sends that task to its `@assignee`.
+- After a worker finishes, they are expected to update that task's `passes` to `true` and write the summary into `progress_note`; the tracker then advances to the next unfinished task.
+- Worker provisioning and room membership remain explicit steps through `list-workers`, `create-worker`, and `join-worker`.

@@ -1,68 +1,104 @@
 ---
 name: manager-worker-dispatch
-description: Use this skill to manage and dispatch tasks to workers. Triggers include: any request to break a task into subtasks and assign them to workers or bots; listing, creating, or selecting workers via the manager_worker_api; sending @-mention messages to workers inside a room; coordinating sequential or parallel multi-worker execution pipelines; dispatching frontend, backend, or QA work to the right worker by capability. Do NOT use for generic project planning, single-agent tasks.
+description: Use this skill to break an admin request into capability-aligned subtasks, provision or reuse workers through manager_worker_api, write the dispatch plan to todo.json, and start sequential task tracking. Do NOT use for generic planning or single-agent execution.
 ---
 
 # Manager Worker Dispatch
 
-Interpret the admin request, break it into capability-aligned subtasks, and dispatch each subtask through the real CSGClaw API.
+Break an admin request into clear tasks, choose workers by capability, and dispatch them through the real CSGClaw API in sequence.
 
-Use the bundled script for deterministic API calls instead of rewriting request code inline.
+Reuse the bundled script instead of writing ad hoc requests.
+Check the script help for the current CLI surface instead of reading reference docs.
 
 ## Workflow
 
-1. Read the admin request and split it into concrete deliverables.
-2. Infer the required capability for each deliverable.
-3. List existing workers with `scripts/manager_worker_api.py list-workers`.
-4. Reuse an existing worker when its `description` matches the needed capability and scope.
-5. Create a worker when no existing worker description clearly matches.
-6. Add the worker to the target room when needed.
-7. Dispatch the subtask by having a bot send a message in that room, and make sure every manager-to-worker message starts with an `@` prefix, for example `@bob 你来写前端代码`.
-8. If the request is sequential, wait for the previous worker to finish before dispatching the next worker with another `@` message.
-9. If the request is parallel, dispatch multiple workers at the same time with separate `@` messages.
+1. Break the admin request into concrete deliverables.
+2. Match each task to the needed capability; run `list-workers` first, reuse by matching `description`, and create a worker only when needed.
+3. Ensure the required workers have joined the target room.
+4. Choose a suitable project directory under `~/.picoclaw/workspace/projects`; create a short slug directory if none fits.
+5. Write or overwrite `todo.json` in that directory as the only source of truth for the current dispatch plan.
+6. Start `scripts/manager_worker_api.py start-tracking` against that `todo.json`.
 
-Keep assignments specific. Include the expected output, scope, and capability.
+## todo.json
+
+`todo.json` must be valid JSON.
+
+- Single task: write one task object.
+- Multiple tasks: write `{ "tasks": [...] }`; array order is dispatch order.
+
+Each task should keep these fields:
+
+- `id`: task number, required, use `1`, `2`, `3` in dispatch order
+- `assignee`: owner, usually a worker name or role-like label
+- `category`: short task type such as `feature`, `bug`, or `test`
+- `description`: task summary
+- `steps`: array of execution steps
+- `passes`: completion state, usually `false` at the start
+- `progress_note`: progress, result, or blocker note, usually an empty string at the start
+
+`id` must always be present and should increase sequentially with the task order in `todo.json`.
+
+Example:
+
+```json
+{
+  "tasks": [
+    {
+      "id": 1,
+      "assignee": "frontend",
+      "category": "feature",
+      "description": "Build the settings page UI and connect the save action.",
+      "steps": [
+        "Implement the settings page layout",
+        "Connect the save action to the API",
+        "Reply to the manager with the implementation summary"
+      ],
+      "passes": false,
+      "progress_note": ""
+    },
+    {
+      "id": 2,
+      "assignee": "qa",
+      "category": "test",
+      "description": "Validate the main settings page flows after frontend delivery.",
+      "steps": [
+        "Verify the main edit and save flows",
+        "Record regressions and blockers",
+        "Reply to the manager with QA results"
+      ],
+      "passes": false,
+      "progress_note": ""
+    }
+  ]
+}
+```
 
 ## Capability Mapping
 
-Map work to worker descriptions before calling the API. Do not select a worker by its `role` field. Read each worker's `description` and choose the one whose described responsibility best matches the task.
+Choose workers by `description`, not just by `role`.
 
-- Frontend UI, page work, styling, interaction: `frontend`
-- APIs, services, storage, data flow: `backend`
-- Validation, regression checks, acceptance checks: `qa`
-- Cross-cutting coordination or unclear requests: split the task first, then assign
+- `frontend`: UI, page work, styling, interaction
+- `backend`: APIs, services, storage, data flow
+- `qa`: validation, regression, acceptance checks
 
-If the admin request implies several capabilities, create one assignment per capability instead of sending one broad task to a single worker.
+Split cross-capability work into multiple tasks instead of giving one vague package to a single worker.
 
 ## Script Usage
-
-Use `scripts/manager_worker_api.py` for API operations.
-
-Common commands:
 
 ```bash
 cd ~/.picoclaw/workspace/skills/manager-worker-dispatch
 python scripts/manager_worker_api.py list-workers
 python scripts/manager_worker_api.py create-worker --name alex --description "qa regression testing"
 python scripts/manager_worker_api.py join-worker --room-id room-123 --worker-id u-alex
-python scripts/manager_worker_api.py send-message --room-id room-123 --text "@alex 你来进行测试，验证登录流程并记录回归风险"
-python scripts/manager_worker_api.py ensure-and-dispatch --room-id room-123 --name bob --description "frontend ui styling interaction" --task "你来写前端代码，实现设置页 UI" --dry-run
+python scripts/manager_worker_api.py start-tracking --room-id room-123 --todo-path ~/.picoclaw/workspace/projects/demo/todo.json
+python scripts/manager_worker_api.py stop-tracking --todo-path ~/.picoclaw/workspace/projects/demo/todo.json
 ```
-
-Read `references/api-contract.md` before changing endpoint names, payload fields, or environment variables.
-
-When the script runs inside a CSGClaw box, it reads these environment variables automatically:
-
-- `CSGCLAW_BASE_URL`
-- `CSGCLAW_ACCESS_TOKEN`
+Use `python scripts/manager_worker_api.py -h` to inspect the latest commands, flags, and environment variable fallbacks before invoking or updating the workflow.
 
 ## Operating Rules
 
-- Prefer an existing worker whose `description` matches the task before creating a new one.
-- Keep worker names short and stable.
-- Add the worker to the room before dispatching the task when the room does not already include that worker.
-- When the manager assigns work, always prefix the worker mention with `@`, and tell the worker to reply with `@` as well.
-- For sequential work, do not dispatch the next worker until the previous worker has completed.
-- For parallel work, multiple workers may be dispatched together with separate `@` messages.
-- Use `--dry-run` first when endpoint compatibility is uncertain.
-- If the API response shape differs from the documented assumptions, patch the script instead of improvising ad hoc requests.
+- Reuse workers before creating new ones.
+- Keep `todo.json` aligned with the actual assignment being dispatched.
+- Do not casually reorder tasks in the sequential flow.
+- Let `start-tracking` drive dispatch from `todo.json`; do not duplicate that logic in manual room-message procedures.
+- If the API response shape differs from expectations, patch the script instead of improvising around it.

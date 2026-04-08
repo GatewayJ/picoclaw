@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import re
+import signal
+import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
 from typing import Any
 from urllib import error, request
 
@@ -18,10 +23,106 @@ CSGCLAW_ACCESS_TOKEN_ENV = "CSGCLAW_ACCESS_TOKEN"
 MANAGER_API_BASE_URL_ENV = "MANAGER_API_BASE_URL"
 MANAGER_API_TOKEN_ENV = "MANAGER_API_TOKEN"
 MANAGER_API_TIMEOUT_ENV = "MANAGER_API_TIMEOUT"
+PICOCLAW_CONFIG_PATH = os.path.expanduser("~/.picoclaw/config.json")
+TRACKING_STATE_ROOT = os.path.join(tempfile.gettempdir(), "manager-worker-dispatch")
 
 
 def build_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def load_local_config() -> dict[str, Any]:
+    if not os.path.exists(PICOCLAW_CONFIG_PATH):
+        return {}
+    try:
+        with open(PICOCLAW_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get_local_csgclaw_settings() -> dict[str, str]:
+    config = load_local_config()
+    channels = config.get("channels")
+    if not isinstance(channels, dict):
+        return {}
+    csgclaw = channels.get("csgclaw")
+    if not isinstance(csgclaw, dict):
+        return {}
+
+    settings: dict[str, str] = {}
+    base_url = csgclaw.get("base_url")
+    access_token = csgclaw.get("access_token")
+    if isinstance(base_url, str) and base_url.strip():
+        settings["base_url"] = base_url.strip()
+    if isinstance(access_token, str) and access_token.strip():
+        settings["access_token"] = access_token.strip()
+    return settings
+
+
+def ensure_tracking_state_root() -> Path:
+    root = Path(TRACKING_STATE_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def make_task_id(task_id: Any, fallback: int) -> Any:
+    if task_id is None:
+        return fallback
+    if isinstance(task_id, str):
+        normalized_task_id = task_id.strip()
+        return normalized_task_id or fallback
+    return task_id
+
+
+def build_todo_tracking_key(todo_path: str) -> str:
+    resolved = os.path.abspath(os.path.expanduser(todo_path))
+    return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:16]
+
+
+def get_tracking_state_paths(todo_path: str) -> tuple[Path, Path]:
+    key = build_todo_tracking_key(todo_path)
+    root = ensure_tracking_state_root()
+    return root / f"{key}.json", root / f"{key}.log"
+
+
+def read_tracking_state(todo_path: str) -> dict[str, Any] | None:
+    state_path, _ = get_tracking_state_paths(todo_path)
+    if not state_path.exists():
+        return None
+    try:
+        with state_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_tracking_state(todo_path: str, state: dict[str, Any]) -> Path:
+    state_path, _ = get_tracking_state_paths(todo_path)
+    with state_path.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    return state_path
+
+
+def remove_tracking_state(todo_path: str) -> None:
+    state_path, _ = get_tracking_state_paths(todo_path)
+    try:
+        state_path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def is_process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class CSGClawAPI:
@@ -153,46 +254,6 @@ class CSGClawAPI:
         )
 
 
-def normalize_description(value: str) -> str:
-    return " ".join(strings for strings in re.split(r"\s+", value.strip().lower()) if strings)
-
-
-def find_worker_by_description(workers: list[dict[str, Any]], description: str) -> dict[str, Any] | None:
-    target = normalize_description(description)
-    if not target:
-        return None
-
-    for worker in workers:
-        worker_description = normalize_description(str(worker.get("description") or ""))
-        if worker_description == target:
-            return worker
-
-    for worker in workers:
-        worker_description = normalize_description(str(worker.get("description") or ""))
-        if worker_description and (target in worker_description or worker_description in target):
-            return worker
-
-    for worker in workers:
-        worker_description = normalize_description(str(worker.get("description") or ""))
-        if not worker_description:
-            continue
-        target_tokens = set(target.split())
-        worker_tokens = set(worker_description.split())
-        if target_tokens and target_tokens.issubset(worker_tokens):
-            return worker
-    return None
-
-
-def get_worker_identity(worker: dict[str, Any]) -> tuple[str, str]:
-    worker_id = str(worker.get("id") or "").strip()
-    worker_name = str(worker.get("name") or "").strip()
-    if not worker_id:
-        raise SystemExit(f"Worker id missing: {json.dumps(worker, ensure_ascii=False)}")
-    if not worker_name:
-        raise SystemExit(f"Worker name missing: {json.dumps(worker, ensure_ascii=False)}")
-    return worker_id, worker_name
-
-
 def build_assignment_text(worker_name: str, task: str, mention: str | None) -> str:
     custom_mention = (mention or "").strip()
     if custom_mention:
@@ -200,17 +261,96 @@ def build_assignment_text(worker_name: str, task: str, mention: str | None) -> s
     return f"@{worker_name} {task}".strip()
 
 
+def load_json_file(path: str) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"todo.json not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid JSON in {path}: {exc}") from exc
+
+
+def normalize_task_record(record: dict[str, Any], task_id: int) -> dict[str, Any]:
+    normalized = dict(record)
+    normalized["id"] = make_task_id(normalized.get("id"), task_id)
+    return normalized
+
+
+def load_tasks(todo_data: Any) -> list[dict[str, Any]]:
+    if isinstance(todo_data, dict) and isinstance(todo_data.get("tasks"), list):
+        tasks = [item for item in todo_data["tasks"] if isinstance(item, dict)]
+        return [normalize_task_record(task, index + 1) for index, task in enumerate(tasks)]
+
+    if isinstance(todo_data, dict):
+        single_task = {key: value for key, value in todo_data.items() if key != "tasks"}
+        return [normalize_task_record(single_task, 1)]
+
+    raise SystemExit("todo.json must be an object or an object with a top-level 'tasks' array")
+
+
+def get_task_passes(task: dict[str, Any]) -> bool:
+    return bool(task.get("passes") is True)
+
+
+def get_pending_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for task in tasks:
+        if not get_task_passes(task):
+            return task
+    return None
+
+
+def summarize_task(task: dict[str, Any]) -> str:
+    description = str(task.get("description") or "").strip()
+    if not description:
+        raise SystemExit("Selected task is missing 'description'")
+
+    category = str(task.get("category") or "").strip()
+    steps = task.get("steps")
+    progress_note = str(task.get("progress_note") or "").strip()
+    passes = task.get("passes")
+
+    lines = [description]
+    if category:
+        lines.append(f"Category: {category}")
+    if isinstance(steps, list) and steps:
+        lines.append("Steps:")
+        for index, step in enumerate(steps, start=1):
+            lines.append(f"{index}. {str(step).strip()}")
+    if progress_note:
+        lines.append(f"Progress note: {progress_note}")
+    if isinstance(passes, bool):
+        lines.append(f"Passes: {'true' if passes else 'false'}")
+    lines.append("完成后请用 @manager 回复结果、阻塞或交接信息。")
+    return "\n".join(lines)
+
+
+def build_tracking_message(task: dict[str, Any], mention: str | None, todo_path: str) -> str:
+    assignee = str(task.get("assignee") or "").strip()
+    if not assignee:
+        raise SystemExit("Selected task is missing 'assignee'")
+    task_id = task.get("id")
+    task_message = (
+        f"请根据{todo_path}处理任务{task_id}。"
+        "完成后请将对应任务的passes更新为true，并将进展备注写到progress_note字段。"
+    )
+    return build_assignment_text(assignee, task_message, mention)
+
+
 def load_api(args: argparse.Namespace) -> CSGClawAPI:
+    local_settings = get_local_csgclaw_settings()
     base_url = (
         args.base_url
         or os.environ.get(CSGCLAW_BASE_URL_ENV)
         or os.environ.get(MANAGER_API_BASE_URL_ENV)
+        or local_settings.get("base_url")
         or DEFAULT_BASE_URL
     )
     token = (
         args.token
         or os.environ.get(CSGCLAW_ACCESS_TOKEN_ENV)
         or os.environ.get(MANAGER_API_TOKEN_ENV)
+        or local_settings.get("access_token")
     )
     timeout = float(os.environ.get(MANAGER_API_TIMEOUT_ENV, "30"))
     return CSGClawAPI(base_url=base_url, token=token, timeout=timeout, dry_run=args.dry_run)
@@ -251,30 +391,194 @@ def cmd_join_worker(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_send_message(args: argparse.Namespace) -> int:
-    api = load_api(args)
-    result = api.send_bot_message(args.bot_id, args.room_id, args.text)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+def cmd_start_tracking(args: argparse.Namespace) -> int:
+    existing_state = read_tracking_state(args.todo_path)
+    if existing_state:
+        pid = existing_state.get("pid")
+        if isinstance(pid, int) and is_process_alive(pid):
+            print(json.dumps(existing_state, ensure_ascii=False, indent=2))
+            return 0
+        remove_tracking_state(args.todo_path)
+
+    state_path, log_path = get_tracking_state_paths(args.todo_path)
+    command = [sys.executable, os.path.abspath(__file__), "run-tracking"]
+    if args.base_url:
+        command.extend(["--base-url", args.base_url])
+    if args.token:
+        command.extend(["--token", args.token])
+    if args.dry_run:
+        command.append("--dry-run")
+    command.extend(
+        [
+            "--room-id",
+            args.room_id,
+            "--bot-id",
+            args.bot_id,
+            "--todo-path",
+            args.todo_path,
+            "--interval",
+            str(args.interval),
+        ]
+    )
+    if args.mention:
+        command.extend(["--mention", args.mention])
+    if args.once:
+        command.append("--once")
+
+    with log_path.open("a", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            start_new_session=True,
+        )
+
+    state = {
+        "event": "tracking-started",
+        "pid": process.pid,
+        "todo_path": os.path.abspath(os.path.expanduser(args.todo_path)),
+        "room_id": args.room_id,
+        "bot_id": args.bot_id,
+        "interval": args.interval,
+        "mention": args.mention or "",
+        "dry_run": bool(args.dry_run),
+        "once": bool(args.once),
+        "log_path": str(log_path),
+        "state_path": str(state_path),
+    }
+    write_tracking_state(args.todo_path, state)
+    print(json.dumps(state, ensure_ascii=False, indent=2))
     return 0
 
 
-def cmd_ensure_and_dispatch(args: argparse.Namespace) -> int:
+def cmd_run_tracking(args: argparse.Namespace) -> int:
     api = load_api(args)
-    worker = find_worker_by_description(api.list_workers(), args.description)
+    last_sent_task_id: str | None = None
+    read_error_streak = 0
+    last_read_error: str | None = None
+    terminated = False
 
-    if worker is None:
-        worker = api.create_worker(args.name, args.role, args.id, args.description, args.model_id)
+    def handle_termination(signum: int, _frame: Any) -> None:
+        nonlocal terminated
+        terminated = True
+        print(
+            json.dumps(
+                {"event": "tracking-stopping", "signal": signum, "todo_path": args.todo_path},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
 
-    worker_id, worker_name = get_worker_identity(worker)
-    text = build_assignment_text(worker_name, args.task, args.mention)
+    signal.signal(signal.SIGTERM, handle_termination)
+    signal.signal(signal.SIGINT, handle_termination)
 
-    result = {
-        "worker": worker,
-        "join": api.join_agent_to_room(worker_id, args.room_id, args.inviter_id, args.locale),
-        "message": api.send_bot_message(args.bot_id, args.room_id, text),
-        "text": text,
-    }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    try:
+        while not terminated:
+            try:
+                todo_data = load_json_file(args.todo_path)
+                tasks = load_tasks(todo_data)
+                if not tasks:
+                    raise SystemExit("todo.json does not contain any tasks")
+            except SystemExit as exc:
+                error_message = str(exc)
+                recoverable = error_message.startswith("todo.json not found:") or error_message.startswith(
+                    "Invalid JSON in "
+                )
+                if not recoverable:
+                    raise
+
+                read_error_streak += 1
+                output = {
+                    "event": "tracking-read-retry",
+                    "todo_path": args.todo_path,
+                    "error": error_message,
+                    "retry_in_seconds": args.interval,
+                    "streak": read_error_streak,
+                }
+                if error_message != last_read_error:
+                    print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                    last_read_error = error_message
+                time.sleep(args.interval)
+                continue
+
+            if read_error_streak:
+                output = {
+                    "event": "tracking-read-recovered",
+                    "todo_path": args.todo_path,
+                    "streak": read_error_streak,
+                }
+                print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                read_error_streak = 0
+                last_read_error = None
+
+            pending_task = get_pending_task(tasks)
+
+            if pending_task is None:
+                output = {
+                    "event": "all-complete",
+                    "todo_path": args.todo_path,
+                    "tasks": [task["id"] for task in tasks],
+                }
+                print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                output = {
+                    "event": "tracking-auto-stopped",
+                    "reason": "all-complete",
+                    "todo_path": args.todo_path,
+                }
+                print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                return 0
+
+            pending_task_id = str(pending_task["id"])
+            should_dispatch = pending_task_id != last_sent_task_id
+            if should_dispatch:
+                text = build_tracking_message(pending_task, args.mention, args.todo_path)
+                result = api.send_bot_message(args.bot_id, args.room_id, text)
+                output = {
+                    "event": "dispatched",
+                    "task_id": pending_task["id"],
+                    "assignee": pending_task["assignee"],
+                    "todo_path": args.todo_path,
+                    "message": result,
+                    "text": text,
+                }
+                print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                last_sent_task_id = pending_task_id
+                if args.once:
+                    return 0
+
+            time.sleep(args.interval)
+    finally:
+        remove_tracking_state(args.todo_path)
+
+
+def cmd_stop_tracking(args: argparse.Namespace) -> int:
+    state = read_tracking_state(args.todo_path)
+    if not state:
+        print(
+            json.dumps(
+                {"event": "tracking-not-running", "todo_path": os.path.abspath(os.path.expanduser(args.todo_path))},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    pid = state.get("pid")
+    if not isinstance(pid, int):
+        remove_tracking_state(args.todo_path)
+        raise SystemExit(f"Invalid tracking state for {args.todo_path}: missing pid")
+
+    if not is_process_alive(pid):
+        remove_tracking_state(args.todo_path)
+        state["event"] = "tracking-already-stopped"
+        print(json.dumps(state, ensure_ascii=False, indent=2))
+        return 0
+
+    os.kill(pid, signal.SIGTERM)
+    state["event"] = "tracking-stop-requested"
+    print(json.dumps(state, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -305,30 +609,53 @@ def build_parser() -> argparse.ArgumentParser:
     join_worker.add_argument("--locale", help="Optional locale, for example zh-CN.")
     join_worker.set_defaults(func=cmd_join_worker)
 
-    send_message = subparsers.add_parser("send-message", help="Send a bot message to a room.")
-    add_common_args(send_message)
-    send_message.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
-    send_message.add_argument("--room-id", required=True, help="Room id.")
-    send_message.add_argument("--text", required=True, help="Message text.")
-    send_message.set_defaults(func=cmd_send_message)
-
-    ensure_dispatch = subparsers.add_parser(
-        "ensure-and-dispatch",
-        help="Find or create a worker by description, join the room, then send a mention message by bot.",
+    start_tracking = subparsers.add_parser(
+        "start-tracking",
+        help="Start a background process that watches todo.json and dispatches the selected task.",
     )
-    add_common_args(ensure_dispatch)
-    ensure_dispatch.add_argument("--room-id", required=True, help="Room id.")
-    ensure_dispatch.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
-    ensure_dispatch.add_argument("--role", default="worker", help="Worker role when creating. Default: worker.")
-    ensure_dispatch.add_argument("--name", required=True, help="Worker name if creation is needed.")
-    ensure_dispatch.add_argument("--task", required=True, help="Task description.")
-    ensure_dispatch.add_argument("--mention", help="Optional custom mention prefix, for example '@bob 请处理'.")
-    ensure_dispatch.add_argument("--id", help="Optional worker id when creating.")
-    ensure_dispatch.add_argument("--description", required=True, help="Worker capability description used for matching and creation.")
-    ensure_dispatch.add_argument("--model-id", help="Optional model id when creating.")
-    ensure_dispatch.add_argument("--inviter-id", default="u-manager", help="Inviter id. Default: u-manager.")
-    ensure_dispatch.add_argument("--locale", help="Optional locale, for example zh-CN.")
-    ensure_dispatch.set_defaults(func=cmd_ensure_and_dispatch)
+    add_common_args(start_tracking)
+    start_tracking.add_argument("--room-id", required=True, help="Room id.")
+    start_tracking.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
+    start_tracking.add_argument("--todo-path", required=True, help="Path to todo.json.")
+    start_tracking.add_argument("--mention", help="Optional custom mention prefix. Default: use @<assignee>.")
+    start_tracking.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Polling interval in seconds. Default: 2.0.",
+    )
+    start_tracking.add_argument(
+        "--once",
+        action="store_true",
+        help="Run the background tracker once for the current task content, then exit.",
+    )
+    start_tracking.set_defaults(func=cmd_start_tracking)
+
+    run_tracking = subparsers.add_parser("run-tracking", help=argparse.SUPPRESS)
+    add_common_args(run_tracking)
+    run_tracking.add_argument("--room-id", required=True, help="Room id.")
+    run_tracking.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
+    run_tracking.add_argument("--todo-path", required=True, help="Path to todo.json.")
+    run_tracking.add_argument("--mention", help="Optional custom mention prefix. Default: use @<assignee>.")
+    run_tracking.add_argument(
+        "--interval",
+        type=float,
+        default=2.0,
+        help="Polling interval in seconds. Default: 2.0.",
+    )
+    run_tracking.add_argument(
+        "--once",
+        action="store_true",
+        help="Send once for the current task content, then exit.",
+    )
+    run_tracking.set_defaults(func=cmd_run_tracking)
+
+    stop_tracking = subparsers.add_parser(
+        "stop-tracking",
+        help="Stop the background tracker for the specified todo.json.",
+    )
+    stop_tracking.add_argument("--todo-path", required=True, help="Path to todo.json.")
+    stop_tracking.set_defaults(func=cmd_stop_tracking)
 
     return parser
 
