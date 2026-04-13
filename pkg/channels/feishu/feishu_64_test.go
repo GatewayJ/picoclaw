@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 func TestExtractContent(t *testing.T) {
@@ -277,5 +279,60 @@ func TestExtractFeishuSenderID(t *testing.T) {
 				t.Errorf("extractFeishuSenderID() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFeishuSSEPayloadToLarkEvent(t *testing.T) {
+	ch := &FeishuChannel{
+		csgclawConfig: config.CSGClawConfig{
+			BaseURL: "https://csg.example.com/",
+			BotID:   "u-manager",
+		},
+	}
+
+	event, err := ch.feishuSSEPayloadToLarkEvent(feishuSSEPayload{
+		Type:   "message.created",
+		RoomID: "oc_f778",
+		Message: feishuSSEMessage{
+			ID:        "om_x100",
+			SenderID:  "ou_323c",
+			Kind:      "message",
+			Content:   "what skills are available?",
+			CreatedAt: "2026-04-13T11:15:01.848093Z",
+			Mentions:  []string{"ou_2074"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("feishuSSEPayloadToLarkEvent() error = %v", err)
+	}
+	if got := stringValue(event.Event.Message.MessageId); got != "om_x100" {
+		t.Fatalf("message id = %q, want om_x100", got)
+	}
+	if got := stringValue(event.Event.Message.ChatId); got != "oc_f778" {
+		t.Fatalf("chat id = %q, want oc_f778", got)
+	}
+	if got := stringValue(event.Event.Sender.SenderId.OpenId); got != "ou_323c" {
+		t.Fatalf("sender open id = %q, want ou_323c", got)
+	}
+	if got := stringValue(event.Event.Message.ChatType); got != "group" {
+		t.Fatalf("chat type = %q, want group", got)
+	}
+	if got := stringValue(event.Event.Message.MessageType); got != larkim.MsgTypeText {
+		t.Fatalf("message type = %q, want %q", got, larkim.MsgTypeText)
+	}
+	if got := stringValue(event.Event.Message.Content); got != `{"text":"what skills are available?"}` {
+		t.Fatalf("content = %q", got)
+	}
+	if len(event.Event.Message.Mentions) != 1 {
+		t.Fatalf("mentions len = %d, want 1", len(event.Event.Message.Mentions))
+	}
+	if got := stringValue(event.Event.Message.Mentions[0].Id.OpenId); got != "ou_2074" {
+		t.Fatalf("mention open id = %q, want ou_2074", got)
+	}
+	if got := ch.csgclawFeishuEventsURL(); got != "https://csg.example.com/api/v1/channels/feishu/bots/u-manager/events" {
+		t.Fatalf("events url = %q", got)
+	}
+	if got, _ := ch.botOpenID.Load().(string); got != "ou_2074" {
+		t.Fatalf("bot open id = %q, want ou_2074", got)
 	}
 }

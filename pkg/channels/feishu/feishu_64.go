@@ -3,17 +3,20 @@
 package feishu
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
@@ -35,12 +38,20 @@ import (
 // on this error, so we do it ourselves.
 const errCodeTenantTokenInvalid = 99991663
 
+const feishuSSEReadTimeout = 0
+
+var (
+	feishuSSEReconnectInitialBackoff = 1 * time.Second
+	feishuSSEReconnectMaxBackoff     = 30 * time.Second
+)
+
 type FeishuChannel struct {
 	*channels.BaseChannel
-	config     config.FeishuConfig
-	client     *lark.Client
-	wsClient   *larkws.Client
-	tokenCache *tokenCache // custom cache that supports invalidation
+	config        config.FeishuConfig
+	csgclawConfig config.CSGClawConfig
+	client        *lark.Client
+	wsClient      *larkws.Client
+	tokenCache    *tokenCache // custom cache that supports invalidation
 
 	botOpenID atomic.Value // stores string; populated lazily for @mention detection
 
@@ -48,7 +59,23 @@ type FeishuChannel struct {
 	cancel context.CancelFunc
 }
 
-func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChannel, error) {
+type feishuSSEPayload struct {
+	Type     string           `json:"type"`
+	TargetID string           `json:"target_id"`
+	RoomID   string           `json:"room_id"`
+	Message  feishuSSEMessage `json:"message"`
+}
+
+type feishuSSEMessage struct {
+	ID        string   `json:"id"`
+	SenderID  string   `json:"sender_id"`
+	Kind      string   `json:"kind"`
+	Content   string   `json:"content"`
+	CreatedAt string   `json:"created_at"`
+	Mentions  []string `json:"mentions"`
+}
+
+func NewFeishuChannel(cfg config.FeishuConfig, csgclawCfg config.CSGClawConfig, bus *bus.MessageBus) (*FeishuChannel, error) {
 	base := channels.NewBaseChannel("feishu", cfg, bus, cfg.AllowFrom,
 		channels.WithGroupTrigger(cfg.GroupTrigger),
 		channels.WithReasoningChannelID(cfg.ReasoningChannelID),
@@ -60,10 +87,11 @@ func NewFeishuChannel(cfg config.FeishuConfig, bus *bus.MessageBus) (*FeishuChan
 		opts = append(opts, lark.WithOpenBaseUrl(lark.LarkBaseUrl))
 	}
 	ch := &FeishuChannel{
-		BaseChannel: base,
-		config:      cfg,
-		tokenCache:  tc,
-		client:      lark.NewClient(cfg.AppID, cfg.AppSecret(), opts...),
+		BaseChannel:   base,
+		config:        cfg,
+		csgclawConfig: csgclawCfg,
+		tokenCache:    tc,
+		client:        lark.NewClient(cfg.AppID, cfg.AppSecret(), opts...),
 	}
 	ch.SetOwner(ch)
 	return ch, nil
@@ -111,6 +139,16 @@ func (c *FeishuChannel) Start(ctx context.Context) error {
 			})
 		}
 	}()
+
+	if c.hasCSGClawSSEConfig() {
+		go c.runCSGClawSSELoop(runCtx)
+		logger.InfoCF("feishu", "Feishu CSGClaw SSE listener started", map[string]any{
+			"base_url": c.csgclawConfig.BaseURL,
+			"bot_id":   c.csgclawConfig.BotID,
+		})
+	} else if c.hasPartialCSGClawSSEConfig() {
+		logger.WarnC("feishu", "Feishu CSGClaw SSE listener disabled because base_url, bot_id, or access_token is missing")
+	}
 
 	return nil
 }
@@ -380,6 +418,7 @@ func (c *FeishuChannel) sendMediaPart(
 // --- Inbound message handling ---
 
 func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
+	fmt.Printf("===== message: %#v", event)
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return nil
 	}
@@ -485,6 +524,256 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 	return nil
 }
 
+func (c *FeishuChannel) hasCSGClawSSEConfig() bool {
+	return strings.TrimSpace(c.csgclawConfig.BaseURL) != "" &&
+		strings.TrimSpace(c.csgclawConfig.BotID) != "" &&
+		strings.TrimSpace(c.csgclawConfig.AccessToken) != ""
+}
+
+func (c *FeishuChannel) hasPartialCSGClawSSEConfig() bool {
+	return strings.TrimSpace(c.csgclawConfig.BaseURL) != "" ||
+		strings.TrimSpace(c.csgclawConfig.BotID) != "" ||
+		strings.TrimSpace(c.csgclawConfig.AccessToken) != ""
+}
+
+func (c *FeishuChannel) runCSGClawSSELoop(ctx context.Context) {
+	backoff := feishuSSEReconnectInitialBackoff
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		resp, err := c.openCSGClawSSEStream(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			logger.WarnCF("feishu", "Failed to connect Feishu CSGClaw SSE stream, will retry", map[string]any{
+				"error":   err.Error(),
+				"backoff": backoff.String(),
+			})
+			if !sleepWithContext(ctx, backoff) {
+				return
+			}
+			backoff = minDuration(backoff*2, feishuSSEReconnectMaxBackoff)
+			continue
+		}
+
+		logger.InfoCF("feishu", "Feishu CSGClaw SSE stream connected", map[string]any{
+			"events_url": c.csgclawFeishuEventsURL(),
+		})
+
+		if err := c.consumeCSGClawSSEEvents(ctx, resp); err != nil && ctx.Err() == nil {
+			logger.WarnCF("feishu", "Feishu CSGClaw SSE stream disconnected, reconnecting", map[string]any{
+				"error":   err.Error(),
+				"backoff": backoff.String(),
+			})
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if !sleepWithContext(ctx, backoff) {
+			return
+		}
+		backoff = minDuration(backoff*2, feishuSSEReconnectMaxBackoff)
+	}
+}
+
+func (c *FeishuChannel) openCSGClawSSEStream(ctx context.Context) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.csgclawFeishuEventsURL(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("feishu csgclaw sse build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.csgclawConfig.AccessToken)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	client := &http.Client{Timeout: feishuSSEReadTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("feishu csgclaw sse connect: %w", channels.ClassifyNetError(err))
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		rawBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, channels.ClassifySendError(
+			resp.StatusCode,
+			fmt.Errorf("feishu csgclaw sse status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(rawBody))),
+		)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		defer resp.Body.Close()
+		return nil, fmt.Errorf("feishu csgclaw sse returned non-SSE content type %q", resp.Header.Get("Content-Type"))
+	}
+	return resp, nil
+}
+
+func (c *FeishuChannel) consumeCSGClawSSEEvents(ctx context.Context, resp *http.Response) error {
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	var (
+		eventType string
+		dataLines []string
+	)
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			c.dispatchCSGClawSSEEvent(ctx, eventType, strings.Join(dataLines, "\n"))
+			eventType = ""
+			dataLines = dataLines[:0]
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+}
+
+func (c *FeishuChannel) dispatchCSGClawSSEEvent(ctx context.Context, eventType, raw string) {
+	if strings.TrimSpace(raw) == "" {
+		return
+	}
+	if eventType != "" && eventType != "message" && eventType != "message.created" {
+		return
+	}
+
+	var payload feishuSSEPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		logger.ErrorCF("feishu", "Failed to decode Feishu CSGClaw SSE event", map[string]any{
+			"error": err.Error(),
+			"event": raw,
+		})
+		return
+	}
+	if payload.Type != "" && payload.Type != "message.created" {
+		return
+	}
+
+	event, err := c.feishuSSEPayloadToLarkEvent(payload)
+	if err != nil {
+		logger.WarnCF("feishu", "Ignored malformed Feishu CSGClaw SSE event", map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
+	if err := c.handleMessageReceive(ctx, event); err != nil {
+		logger.ErrorCF("feishu", "Failed to handle Feishu CSGClaw SSE message", map[string]any{
+			"error": err.Error(),
+		})
+	}
+}
+
+func (c *FeishuChannel) feishuSSEPayloadToLarkEvent(payload feishuSSEPayload) (*larkim.P2MessageReceiveV1, error) {
+	if strings.TrimSpace(payload.RoomID) == "" {
+		return nil, fmt.Errorf("room_id is empty")
+	}
+	if strings.TrimSpace(payload.Message.SenderID) == "" {
+		return nil, fmt.Errorf("message.sender_id is empty")
+	}
+
+	messageID := payload.Message.ID
+	chatID := payload.RoomID
+	senderID := payload.Message.SenderID
+	targetID := payload.TargetID
+	createdAt := payload.Message.CreatedAt
+	messageType := larkim.MsgTypeText
+
+	contentBytes, err := json.Marshal(map[string]string{"text": payload.Message.Content})
+	if err != nil {
+		return nil, fmt.Errorf("marshal text content: %w", err)
+	}
+	content := string(contentBytes)
+
+	// TODO(csgclaw-feishu-sse): the SSE payload does not currently expose Feishu
+	// chat_type/message_type/raw content. Mock all inbound SSE messages as group
+	// text messages until the message bus provides those fields.
+	chatType := "group"
+
+	mentions := make([]*larkim.MentionEvent, 0, len(payload.Message.Mentions))
+	for i, mention := range payload.Message.Mentions {
+		mention = strings.TrimSpace(mention)
+		if mention == "" {
+			continue
+		}
+		key := fmt.Sprintf("@_user_%d", i+1)
+		mentions = append(mentions, &larkim.MentionEvent{
+			Key:  ptrString(key),
+			Id:   &larkim.UserId{OpenId: ptrString(mention)},
+			Name: ptrString(mention),
+		})
+	}
+	if targetID != "" {
+		c.botOpenID.Store(targetID)
+	} else if len(mentions) > 0 && mentions[0].Id != nil && mentions[0].Id.OpenId != nil {
+		c.botOpenID.Store(*mentions[0].Id.OpenId)
+	}
+
+	return &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: ptrString(senderID)},
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   ptrString(messageID),
+				ChatId:      ptrString(chatID),
+				ChatType:    ptrString(chatType),
+				MessageType: ptrString(messageType),
+				Content:     ptrString(content),
+				CreateTime:  ptrString(createdAt),
+				Mentions:    mentions,
+			},
+		},
+	}, nil
+}
+
+func (c *FeishuChannel) csgclawFeishuEventsURL() string {
+	return strings.TrimRight(c.csgclawConfig.BaseURL, "/") +
+		"/api/v1/channels/feishu/bots/" +
+		url.PathEscape(c.csgclawConfig.BotID) +
+		"/events"
+}
+
+func ptrString(s string) *string {
+	return &s
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // --- Internal helpers ---
 
 // fetchBotOpenID calls the Feishu bot info API to retrieve and store the bot's open_id.
@@ -535,6 +824,7 @@ func (c *FeishuChannel) isBotMentioned(message *larkim.EventMessage) bool {
 	}
 
 	for _, m := range message.Mentions {
+		fmt.Printf("===== ID: %+v, knownID: %s", m.Id, knownID)
 		if m.Id == nil {
 			continue
 		}
