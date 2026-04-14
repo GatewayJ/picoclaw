@@ -12,6 +12,8 @@ package config
 // literals to keep all supported knobs visible in one place and to prevent
 // typos.
 const (
+	EnvChannelsFeishuAppSecret = "PICOCLAW_CHANNELS_FEISHU_APP_SECRET"
+
 	// EnvHome overrides the base directory for all picoclaw data
 	// (config, workspace, skills, auth store, …).
 	// Default: ~/.picoclaw

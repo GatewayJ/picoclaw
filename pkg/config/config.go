@@ -1389,6 +1389,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := env.Parse(cfg); err != nil {
 		return nil, err
 	}
+	applyChannelSecurityEnvOverrides(cfg)
 
 	if err := resolveAPIKeys(cfg.ModelList, filepath.Dir(path)); err != nil {
 		return nil, err
@@ -1422,6 +1423,16 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func applyChannelSecurityEnvOverrides(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+
+	if secret, ok := os.LookupEnv(EnvChannelsFeishuAppSecret); ok && secret != "" {
+		cfg.Channels.Feishu.appSecret = secret
+	}
 }
 
 func applyCustomModelDefaults(cfg *Config) {

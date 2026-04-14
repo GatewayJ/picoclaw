@@ -42,6 +42,17 @@
       },
       "reasoning_channel_id": ""
     },
+    "feishu": {
+      "enabled": true,
+      "app_id": "bot_app_id",
+      "app_secret": "bot_app_secret",
+      "encrypt_key": "",
+      "verification_token": "",
+      "group_trigger": {
+        "mention_only": true
+      },
+      "allow_from": []
+    },
     "matrix": {
       "allow_from": [],
       "crypto_passphrase": "",

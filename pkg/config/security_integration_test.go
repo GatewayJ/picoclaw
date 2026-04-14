@@ -168,6 +168,40 @@ func TestSecurityConfigWithAPIKeysArray(t *testing.T) {
 	})
 }
 
+func TestFeishuAppSecretPrefersEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	configPath := filepath.Join(tmpDir, "config.json")
+	configContent := `{
+  "version": 1,
+  "model_list": [],
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "app_id": "test_app_id",
+      "app_secret": "feishu_test_app_secret_from_config"
+    }
+  }
+}`
+	err := os.WriteFile(configPath, []byte(configContent), 0o644)
+	require.NoError(t, err)
+
+	securityPath := filepath.Join(tmpDir, SecurityConfigFile)
+	securityContent := `channels:
+  feishu:
+    app_secret: "feishu_test_app_secret_from_security"`
+	err = os.WriteFile(securityPath, []byte(securityContent), 0o600)
+	require.NoError(t, err)
+
+	t.Setenv(EnvChannelsFeishuAppSecret, "feishu_test_app_secret_from_env")
+
+	cfg, err := LoadConfig(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.Equal(t, "feishu_test_app_secret_from_env", cfg.Channels.Feishu.AppSecret())
+}
+
 func TestAllSecurityKeysAccessible(t *testing.T) {
 	t.Run("All security keys accessible via Key() methods including file://", func(t *testing.T) {
 		tmpDir := t.TempDir()
