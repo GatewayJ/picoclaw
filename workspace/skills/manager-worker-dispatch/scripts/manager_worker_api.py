@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Simple CLI for worker management and task dispatch in CSGClaw."""
+"""Simple CLI for task tracking in CSGClaw."""
 
 from __future__ import annotations
 
@@ -26,10 +26,20 @@ MANAGER_API_TOKEN_ENV = "MANAGER_API_TOKEN"
 MANAGER_API_TIMEOUT_ENV = "MANAGER_API_TIMEOUT"
 PICOCLAW_CONFIG_PATH = os.path.expanduser("~/.picoclaw/config.json")
 TRACKING_STATE_ROOT = os.path.join(tempfile.gettempdir(), "manager-worker-dispatch")
+FEISHU_DISPATCH_DELAY_SECONDS = 5.0
 
 
 def build_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+def channel_resource_path(channel: str, resource: str) -> str:
+    normalized = channel.strip().lower()
+    if normalized in ("", "csgclaw"):
+        return f"/api/v1/{resource.lstrip('/')}"
+    if normalized == "feishu":
+        return f"/api/v1/channels/feishu/{resource.lstrip('/')}"
+    raise SystemExit(f'Unsupported channel "{channel}"')
 
 
 def load_local_config() -> dict[str, Any]:
@@ -246,6 +256,19 @@ def resolve_room_assignee(bootstrap: dict[str, Any], room_id: str, assignee: Any
     return user
 
 
+def resolve_feishu_mention_id(task: dict[str, Any]) -> str:
+    explicit = str(task.get("mention_id") or task.get("assignee_id") or "").strip()
+    if explicit:
+        return explicit
+
+    assignee = str(task.get("assignee") or "").strip()
+    if not assignee:
+        raise SystemExit("Selected task is missing 'assignee'")
+    if assignee.startswith("u-") or assignee.startswith("ou_"):
+        return assignee
+    return f"u-{normalize_handle(assignee)}"
+
+
 def build_wait_event(
     event: str,
     *,
@@ -279,7 +302,6 @@ def decide_tracking_action(
     *,
     bot_id: str,
     room_id: str,
-    mention: str | None,
     todo_path: str,
     retry_in_seconds: float,
 ) -> dict[str, Any]:
@@ -289,7 +311,7 @@ def decide_tracking_action(
 
     pending_task = tasks[pending_index]
     pending_task_id = pending_task["id"]
-    pending_dispatch_text = build_tracking_message(pending_task, mention, todo_path)
+    pending_dispatch_text = build_tracking_message(pending_task, todo_path)
     pending_dispatch_message = find_task_dispatch_message(messages, bot_id, pending_dispatch_text)
     if pending_dispatch_message is not None:
         return {
@@ -307,15 +329,17 @@ def decide_tracking_action(
         }
 
     if pending_index == 0:
+        pending_assignee_user = resolve_room_assignee(bootstrap, room_id, pending_task.get("assignee"))
         return {
             "kind": "dispatch",
             "task": pending_task,
             "text": pending_dispatch_text,
+            "mention_id": str(pending_assignee_user.get("id") or "").strip(),
         }
 
     completed_task = tasks[pending_index - 1]
     completed_task_id = completed_task["id"]
-    completed_dispatch_text = build_tracking_message(completed_task, mention, todo_path)
+    completed_dispatch_text = build_tracking_message(completed_task, todo_path)
     completed_dispatch_message = find_task_dispatch_message(messages, bot_id, completed_dispatch_text)
     if completed_dispatch_message is None:
         raise TrackingError(
@@ -351,10 +375,51 @@ def decide_tracking_action(
             ),
         }
 
+    pending_assignee_user = resolve_room_assignee(bootstrap, room_id, pending_task.get("assignee"))
     return {
         "kind": "dispatch",
         "task": pending_task,
         "text": pending_dispatch_text,
+        "mention_id": str(pending_assignee_user.get("id") or "").strip(),
+    }
+
+
+def decide_feishu_tracking_action(
+    tasks: list[dict[str, Any]],
+    *,
+    room_id: str,
+    todo_path: str,
+    retry_in_seconds: float,
+    previous_pending_index: int | None,
+) -> dict[str, Any]:
+    pending_index = get_pending_task_index(tasks)
+    if pending_index is None:
+        return {"kind": "complete"}
+
+    pending_task = tasks[pending_index]
+    pending_task_id = pending_task["id"]
+    pending_dispatch_text = build_tracking_message(pending_task, todo_path)
+    if previous_pending_index == pending_index:
+        return {
+            "kind": "wait",
+            "wait_key": f"waiting-for-task-passes:{pending_task_id}",
+            "output": build_wait_event(
+                "waiting-for-task-passes",
+                todo_path=todo_path,
+                room_id=room_id,
+                retry_in_seconds=retry_in_seconds,
+                task_id=pending_task_id,
+                assignee=pending_task.get("assignee"),
+            ),
+        }
+
+    return {
+        "kind": "dispatch",
+        "task": pending_task,
+        "text": pending_dispatch_text,
+        "mention_id": resolve_feishu_mention_id(pending_task),
+        "delay_seconds": 0.0 if pending_index == 0 else FEISHU_DISPATCH_DELAY_SECONDS,
+        "pending_index": pending_index,
     }
 
 
@@ -409,7 +474,9 @@ class CSGClawAPI:
         if method == "GET" and path == "/api/v1/im/bootstrap":
             return {"current_user_id": "u-admin", "users": [], "rooms": []}
 
-        if method == "GET" and path.startswith("/api/v1/messages?"):
+        if method == "GET" and (
+            path.startswith("/api/v1/messages?") or path.startswith("/api/v1/channels/feishu/messages?")
+        ):
             return []
 
         result: dict[str, Any] = {
@@ -419,78 +486,57 @@ class CSGClawAPI:
             "payload": payload,
         }
 
-        if method == "POST" and path == "/api/v1/workers":
-            worker_name = str((payload or {}).get("name") or "worker")
-            worker_role = str((payload or {}).get("role") or "worker")
-            worker_id = str((payload or {}).get("id") or f"u-{worker_name}")
-            result.update(
-                {
-                    "id": worker_id,
-                    "name": worker_name,
-                    "role": "worker",
-                    "description": (payload or {}).get("description", ""),
-                    "status": "running",
-                    "model_id": (payload or {}).get("model_id", ""),
-                }
-            )
-            return result
-
-        if method == "POST" and path == "/api/v1/im/agents/join":
-            result["joined"] = True
-            return result
-
         if method == "POST" and path.startswith("/api/bots/") and path.endswith("/messages/send"):
             result["message_id"] = "dry-run-message-id"
             return result
 
         return result
 
-    def list_workers(self) -> list[dict[str, Any]]:
-        data = self.request_json("GET", "/api/v1/workers")
-        if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict)]
-        raise SystemExit(f"Unexpected worker list response: {json.dumps(data, ensure_ascii=False)}")
-
-    def create_worker(
-        self,
-        name: str,
-        role: str,
-        worker_id: str | None,
-        description: str | None,
-        model_id: str | None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"name": name, "role": role}
-        if worker_id:
-            payload["id"] = worker_id
-        if description:
-            payload["description"] = description
-        if model_id:
-            payload["model_id"] = model_id
-        return self.request_json("POST", "/api/v1/workers", payload)
-
-    def join_agent_to_room(
-        self,
-        agent_id: str,
-        room_id: str,
-        inviter_id: str | None,
-        locale: str | None,
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "agent_id": agent_id,
-            "room_id": room_id,
-        }
-        if inviter_id:
-            payload["inviter_id"] = inviter_id
-        if locale:
-            payload["locale"] = locale
-        return self.request_json("POST", "/api/v1/im/agents/join", payload)
-
-    def send_bot_message(self, bot_id: str, room_id: str, text: str) -> dict[str, Any]:
-        return self.request_json(
-            "POST",
-            f"/api/bots/{bot_id}/messages/send",
-            {"room_id": room_id, "text": text},
+    def send_bot_message(self, channel: str, room_id: str, bot_id: str, mention_bot_id: str, content: str) -> Any:
+        command = [
+            "csgclaw-cli",
+            "--endpoint",
+            self.base_url,
+            "--output",
+            "json",
+        ]
+        if self.token:
+            command.extend(["--token", self.token])
+        command.extend(
+            [
+                "message",
+                "create",
+                "--channel",
+                channel,
+                "--room-id",
+                room_id,
+                "--sender-id",
+                bot_id,
+                "--mention-id",
+                mention_bot_id,
+                "--content",
+                content,
+            ]
         )
+
+        if self.dry_run:
+            return {"dry_run": True, "command": command}
+
+        try:
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise SystemExit("csgclaw-cli was not found in PATH") from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()
+            raise SystemExit(f"csgclaw-cli message create failed: {detail}") from exc
+
+        output = completed.stdout.strip()
+        if not output:
+            return {}
+        try:
+            return json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"Invalid JSON response from csgclaw-cli message create: {output}") from exc
 
     def get_bootstrap(self) -> dict[str, Any]:
         data = self.request_json("GET", "/api/v1/im/bootstrap")
@@ -498,19 +544,12 @@ class CSGClawAPI:
             return data
         raise SystemExit(f"Unexpected bootstrap response: {json.dumps(data, ensure_ascii=False)}")
 
-    def list_messages(self, room_id: str) -> list[dict[str, Any]]:
+    def list_messages(self, channel: str, room_id: str) -> list[dict[str, Any]]:
         query = parse.urlencode({"room_id": room_id})
-        data = self.request_json("GET", f"/api/v1/messages?{query}")
+        data = self.request_json("GET", f"{channel_resource_path(channel, 'messages')}?{query}")
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
         raise SystemExit(f"Unexpected message list response: {json.dumps(data, ensure_ascii=False)}")
-
-
-def build_assignment_text(worker_name: str, task: str, mention: str | None) -> str:
-    custom_mention = (mention or "").strip()
-    if custom_mention:
-        return f"{custom_mention} {task}".strip()
-    return f"@{worker_name} {task}".strip()
 
 
 def load_json_file(path: str) -> Any:
@@ -578,7 +617,7 @@ def summarize_task(task: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_tracking_message(task: dict[str, Any], mention: str | None, todo_path: str) -> str:
+def build_tracking_message(task: dict[str, Any], todo_path: str) -> str:
     assignee = str(task.get("assignee") or "").strip()
     if not assignee:
         raise SystemExit("Selected task is missing 'assignee'")
@@ -586,10 +625,9 @@ def build_tracking_message(task: dict[str, Any], mention: str | None, todo_path:
     task_message = (
         f"请根据{todo_path}处理任务{task_id}。"
         "完成后请将对应任务的passes更新为true，并将进展备注写到progress_note字段。"
-        "同时请在当前房间回复 @manager 结果或阻塞说明。"
         "不要手动通知下一位执行者；tracker 会在你回复且 todo.json 更新后自动分派后续任务。"
     )
-    return build_assignment_text(assignee, task_message, mention)
+    return task_message
 
 
 def load_api(args: argparse.Namespace) -> CSGClawAPI:
@@ -626,26 +664,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print requests instead of sending them.")
 
 
-def cmd_list_workers(args: argparse.Namespace) -> int:
-    api = load_api(args)
-    print(json.dumps(api.list_workers(), ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_create_worker(args: argparse.Namespace) -> int:
-    api = load_api(args)
-    worker = api.create_worker(args.name, args.role, args.id, args.description, args.model_id)
-    print(json.dumps(worker, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_join_worker(args: argparse.Namespace) -> int:
-    api = load_api(args)
-    result = api.join_agent_to_room(args.worker_id, args.room_id, args.inviter_id, args.locale)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
-
-
 def cmd_start_tracking(args: argparse.Namespace) -> int:
     existing_state = read_tracking_state(args.todo_path)
     if existing_state:
@@ -665,6 +683,8 @@ def cmd_start_tracking(args: argparse.Namespace) -> int:
         command.append("--dry-run")
     command.extend(
         [
+            "--channel",
+            args.channel,
             "--room-id",
             args.room_id,
             "--bot-id",
@@ -675,8 +695,6 @@ def cmd_start_tracking(args: argparse.Namespace) -> int:
             str(args.interval),
         ]
     )
-    if args.mention:
-        command.extend(["--mention", args.mention])
     if args.once:
         command.append("--once")
 
@@ -693,10 +711,10 @@ def cmd_start_tracking(args: argparse.Namespace) -> int:
         "event": "tracking-started",
         "pid": process.pid,
         "todo_path": os.path.abspath(os.path.expanduser(args.todo_path)),
+        "channel": args.channel,
         "room_id": args.room_id,
         "bot_id": args.bot_id,
         "interval": args.interval,
-        "mention": args.mention or "",
         "dry_run": bool(args.dry_run),
         "once": bool(args.once),
         "log_path": str(log_path),
@@ -712,6 +730,7 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
     read_error_streak = 0
     last_read_error: str | None = None
     last_wait_key: str | None = None
+    last_feishu_pending_index: int | None = None
     terminated = False
 
     def handle_termination(signum: int, _frame: Any) -> None:
@@ -768,16 +787,26 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
                 read_error_streak = 0
                 last_read_error = None
 
-            decision = decide_tracking_action(
-                tasks,
-                api.list_messages(args.room_id),
-                api.get_bootstrap(),
-                bot_id=args.bot_id,
-                room_id=args.room_id,
-                mention=args.mention,
-                todo_path=args.todo_path,
-                retry_in_seconds=args.interval,
-            )
+            if args.channel.strip().lower() == "feishu":
+                decision = decide_feishu_tracking_action(
+                    tasks,
+                    room_id=args.room_id,
+                    todo_path=args.todo_path,
+                    retry_in_seconds=args.interval,
+                    previous_pending_index=last_feishu_pending_index,
+                )
+            else:
+                messages = api.list_messages(args.channel, args.room_id)
+                bootstrap = api.get_bootstrap()
+                decision = decide_tracking_action(
+                    tasks,
+                    messages,
+                    bootstrap,
+                    bot_id=args.bot_id,
+                    room_id=args.room_id,
+                    todo_path=args.todo_path,
+                    retry_in_seconds=args.interval,
+                )
 
             if decision["kind"] == "complete":
                 output = {
@@ -809,16 +838,40 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
 
             pending_task = decision["task"]
             text = str(decision["text"])
-            result = api.send_bot_message(args.bot_id, args.room_id, text)
+            mention_id = str(decision["mention_id"])
+            delay_seconds = float(decision.get("delay_seconds", 0) or 0)
+            if delay_seconds > 0:
+                print(
+                    json.dumps(
+                        {
+                            "event": "waiting-before-dispatch",
+                            "task_id": pending_task["id"],
+                            "assignee": pending_task["assignee"],
+                            "todo_path": args.todo_path,
+                            "wait_seconds": delay_seconds,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    flush=True,
+                )
+                time.sleep(delay_seconds)
+                if terminated:
+                    return 0
+
+            result = api.send_bot_message(args.channel, args.room_id, args.bot_id, mention_id, text)
             output = {
                 "event": "dispatched",
                 "task_id": pending_task["id"],
                 "assignee": pending_task["assignee"],
+                "mention_id": mention_id,
                 "todo_path": args.todo_path,
                 "message": result,
                 "text": text,
             }
             print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+            if args.channel.strip().lower() == "feishu":
+                last_feishu_pending_index = int(decision["pending_index"])
             last_wait_key = None
             if args.once:
                 return 0
@@ -860,41 +913,20 @@ def cmd_stop_tracking(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Call CSGClaw worker and bot APIs.")
+    parser = argparse.ArgumentParser(description="Track todo.json progress and dispatch CSGClaw tasks.")
     add_common_args(parser)
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    list_workers = subparsers.add_parser("list-workers", help="Fetch all workers.")
-    add_common_args(list_workers)
-    list_workers.set_defaults(func=cmd_list_workers)
-
-    create_worker = subparsers.add_parser("create-worker", help="Create a worker.")
-    add_common_args(create_worker)
-    create_worker.add_argument("--name", required=True, help="Worker name.")
-    create_worker.add_argument("--role", default="worker", help="Worker role. Default: worker.")
-    create_worker.add_argument("--id", help="Optional worker id.")
-    create_worker.add_argument("--description", help="Optional worker description.")
-    create_worker.add_argument("--model-id", help="Optional model id.")
-    create_worker.set_defaults(func=cmd_create_worker)
-
-    join_worker = subparsers.add_parser("join-worker", help="Join a worker to a room.")
-    add_common_args(join_worker)
-    join_worker.add_argument("--room-id", required=True, help="Room id.")
-    join_worker.add_argument("--worker-id", required=True, help="Worker agent id.")
-    join_worker.add_argument("--inviter-id", default="u-manager", help="Inviter id. Default: u-manager.")
-    join_worker.add_argument("--locale", help="Optional locale, for example zh-CN.")
-    join_worker.set_defaults(func=cmd_join_worker)
 
     start_tracking = subparsers.add_parser(
         "start-tracking",
         help="Start a background process that watches todo.json and dispatches the selected task.",
     )
     add_common_args(start_tracking)
+    start_tracking.add_argument("--channel", default="csgclaw", help="Channel name: csgclaw or feishu. Default: csgclaw.")
     start_tracking.add_argument("--room-id", required=True, help="Room id.")
     start_tracking.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
     start_tracking.add_argument("--todo-path", required=True, help="Path to todo.json.")
-    start_tracking.add_argument("--mention", help="Optional custom mention prefix. Default: use @<assignee>.")
     start_tracking.add_argument(
         "--interval",
         type=float,
@@ -910,10 +942,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_tracking = subparsers.add_parser("run-tracking", help=argparse.SUPPRESS)
     add_common_args(run_tracking)
+    run_tracking.add_argument("--channel", default="csgclaw", help="Channel name: csgclaw or feishu. Default: csgclaw.")
     run_tracking.add_argument("--room-id", required=True, help="Room id.")
     run_tracking.add_argument("--bot-id", default="u-manager", help="Bot id used as message sender.")
     run_tracking.add_argument("--todo-path", required=True, help="Path to todo.json.")
-    run_tracking.add_argument("--mention", help="Optional custom mention prefix. Default: use @<assignee>.")
     run_tracking.add_argument(
         "--interval",
         type=float,
