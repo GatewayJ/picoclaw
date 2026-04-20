@@ -46,4 +46,5 @@ RUN /usr/local/bin/picoclaw onboard && \
 COPY --chown=picoclaw:picoclaw docker/config/config.json /home/picoclaw/.picoclaw/config.json
 
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["picoclaw", "gateway", "-d"]
+CMD ["sleep", "infinity"]
+# CMD ["picoclaw", "gateway", "-d"]
