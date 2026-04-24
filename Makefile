@@ -18,11 +18,13 @@ LDFLAGS=-X $(CONFIG_PKG).Version=$(VERSION) -X $(CONFIG_PKG).GitCommit=$(GIT_COM
 DOCKERFILE?=docker/Dockerfile
 DOCKER_BUILD_CONTEXT?=.
 DOCKER_IMAGE_NAME?=$(BINARY_NAME)
-DOCKER_IMAGE_TAG?=2026.4.24.0
+DOCKER_IMAGE_TAG?=2026.4.24.2
 DOCKER_IMAGE?=$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)
+DOCKER_PLATFORMS?=linux/amd64,linux/arm64
 GHCR_OWNER?=russellluo
 GHCR_IMAGE_NAME?=picoclaw
 GHCR_IMAGE?=ghcr.io/$(GHCR_OWNER)/$(GHCR_IMAGE_NAME):$(DOCKER_IMAGE_TAG)
+DOCKER_CSGCLAW_CLI_ARCHES?=amd64 arm64
 
 # Go variables
 GO?=CGO_ENABLED=0 go
@@ -301,18 +303,29 @@ docker-image-build:
 	@echo "Building Docker image: $(DOCKER_IMAGE)"
 	docker build -f $(DOCKERFILE) -t $(DOCKER_IMAGE) $(DOCKER_BUILD_CONTEXT)
 
-## docker-image-push-ghcr: Tag the local image and push it to ghcr.io
-docker-image-push-ghcr: docker-image-build
+## docker-image-push-ghcr: Build and push a multi-arch image to ghcr.io
+docker-image-push-ghcr:
 	@if [ -z "$(GHCR_OWNER)" ]; then \
 		echo "Error: GHCR_OWNER is required"; \
 		echo "Example: make docker-image-push-ghcr GHCR_OWNER=<github-user-or-org>"; \
 		exit 1; \
 	fi
-	@echo "Tagging Docker image: $(DOCKER_IMAGE) -> $(GHCR_IMAGE)"
-	docker tag $(DOCKER_IMAGE) $(GHCR_IMAGE)
-	@echo "Pushing Docker image to GHCR: $(GHCR_IMAGE)"
+	@for arch in $(DOCKER_CSGCLAW_CLI_ARCHES); do \
+		file="$(DOCKER_BUILD_CONTEXT)/docker/csgclaw-cli/csgclaw-cli_linux_$$arch"; \
+		if [ ! -f "$$file" ]; then \
+			echo "Error: missing $$file"; \
+			exit 1; \
+		fi; \
+	done
+	@echo "Building and pushing Docker image to GHCR: $(GHCR_IMAGE)"
+	@echo "Target platforms: $(DOCKER_PLATFORMS)"
 	@echo "Make sure you have logged in first: echo <TOKEN> | docker login ghcr.io -u <USER> --password-stdin"
-	docker push $(GHCR_IMAGE)
+	docker buildx build \
+		-f $(DOCKERFILE) \
+		--platform $(DOCKER_PLATFORMS) \
+		-t $(GHCR_IMAGE) \
+		--push \
+		$(DOCKER_BUILD_CONTEXT)
 
 ## docker-build-full: Build Docker image with full MCP support (Node.js 24)
 docker-build-full:

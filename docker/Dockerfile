@@ -16,6 +16,13 @@ COPY . .
 RUN make build
 
 # ============================================================
+# Stage 1.5: Select the platform-specific csgclaw-cli binary
+# ============================================================
+FROM scratch AS csgclaw-cli
+ARG TARGETARCH
+COPY docker/csgclaw-cli/csgclaw-cli_linux_${TARGETARCH} /csgclaw-cli
+
+# ============================================================
 # Stage 2: Minimal runtime image
 # ============================================================
 FROM alpine:3.23
@@ -28,7 +35,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
-COPY --chmod=0755 docker/csgclaw-cli /usr/local/bin/csgclaw-cli
+COPY --from=csgclaw-cli /csgclaw-cli /usr/local/bin/csgclaw-cli
 
 # Create non-root user and group
 RUN addgroup -g 1000 picoclaw && \
