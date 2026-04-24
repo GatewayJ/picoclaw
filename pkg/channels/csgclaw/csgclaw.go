@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -227,8 +228,9 @@ func (c *Channel) runEventLoop() {
 			}
 
 			logger.WarnCF("csgclaw", "Failed to connect SSE stream, will retry", map[string]any{
-				"error":   err.Error(),
-				"backoff": backoff.String(),
+				"error":      err.Error(),
+				"backoff":    backoff.String(),
+				"events_url": c.eventsURL(),
 			})
 			if !sleepWithContext(c.ctx, backoff) {
 				return
@@ -501,6 +503,25 @@ func (c *Channel) sendURL() string {
 }
 
 func (c *Channel) botAPIURL(suffix string) string {
-	base := strings.TrimRight(c.config.BaseURL, "/")
-	return fmt.Sprintf("%s/api/bots/%s%s", base, url.PathEscape(c.config.BotID), suffix)
+	baseURL, err := url.Parse(c.config.BaseURL)
+	if err != nil {
+		base := strings.TrimRight(c.config.BaseURL, "/")
+		return fmt.Sprintf("%s/api/bots/%s%s", base, url.PathEscape(c.config.BotID), suffix)
+	}
+
+	pathParts := []string{"api", "bots", c.config.BotID}
+	for _, part := range strings.Split(strings.Trim(suffix, "/"), "/") {
+		if part == "" {
+			continue
+		}
+		pathParts = append(pathParts, part)
+	}
+
+	basePath := baseURL.EscapedPath()
+	if basePath == "" {
+		basePath = "/"
+	}
+	baseURL.Path = path.Join(append([]string{basePath}, pathParts...)...)
+	baseURL.RawPath = ""
+	return baseURL.String()
 }
