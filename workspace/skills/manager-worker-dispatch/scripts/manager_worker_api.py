@@ -29,6 +29,10 @@ TRACKING_STATE_ROOT = os.path.join(tempfile.gettempdir(), "manager-worker-dispat
 FEISHU_DISPATCH_DELAY_SECONDS = 5.0
 
 
+def current_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def build_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
@@ -126,6 +130,59 @@ def remove_tracking_state(todo_path: str) -> None:
         return
 
 
+def sanitize_log_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): sanitize_log_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [sanitize_log_value(item) for item in value]
+    return str(value)
+
+
+def emit_log(log_path: Path, event: str, **fields: Any) -> None:
+    payload = {"ts": current_timestamp(), "event": event}
+    payload.update({key: sanitize_log_value(value) for key, value in fields.items()})
+    line = json.dumps(payload, ensure_ascii=False)
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.write("\n")
+    if sys.stdout.isatty():
+        print(line, flush=True)
+
+
+def summarize_tasks_for_debug(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for task in tasks:
+        summary.append(
+            {
+                "id": task.get("id"),
+                "assignee": task.get("assignee"),
+                "passes": get_task_passes(task),
+                "description": str(task.get("description") or "").strip(),
+            }
+        )
+    return summary
+
+
+def summarize_messages_for_debug(messages: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for message in messages[-limit:]:
+        summary.append(
+            {
+                "id": message.get("id"),
+                "sender_id": message.get("sender_id"),
+                "created_at": message.get("created_at"),
+                "content": str(message.get("content") or "").strip(),
+            }
+        )
+    return summary
+
+
 def is_process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -183,8 +240,12 @@ def find_task_dispatch_message(
     for message in messages:
         sender_id = str(message.get("sender_id") or "").strip()
         content = str(message.get("content") or "").strip()
-        if sender_id != expected_sender_id or content != expected_content:
+        if sender_id != expected_sender_id:
             continue
+        if content != expected_content:
+            parts = content.split(" ", 1)
+            if len(parts) != 2 or not parts[0].startswith("@") or parts[1].strip() != expected_content:
+                continue
         return message
     return None
 
@@ -207,9 +268,9 @@ def has_assignee_reply_after(
     return False
 
 
-def get_room_participant_index(bootstrap: dict[str, Any], room_id: str) -> dict[str, dict[str, Any]]:
+def get_room_member_index(bootstrap: dict[str, Any], room_id: str) -> dict[str, dict[str, Any]]:
     if not isinstance(bootstrap, dict):
-        raise TrackingError("Unexpected bootstrap response while resolving room participants")
+        raise TrackingError("Unexpected bootstrap response while resolving room members")
 
     rooms = bootstrap.get("rooms")
     users = bootstrap.get("users")
@@ -226,18 +287,18 @@ def get_room_participant_index(bootstrap: dict[str, Any], room_id: str) -> dict[
     if room is None:
         raise TrackingError(f'Room "{room_id}" was not found in IM bootstrap data')
 
-    participants = room.get("participants")
-    if not isinstance(participants, list):
-        raise TrackingError(f'Room "{room_id}" is missing participant data in IM bootstrap response')
+    members = room.get("members")
+    if not isinstance(members, list):
+        raise TrackingError(f'Room "{room_id}" is missing member data in IM bootstrap response')
 
-    participant_ids = {str(participant_id).strip() for participant_id in participants if str(participant_id).strip()}
+    member_ids = {str(member_id).strip() for member_id in members if str(member_id).strip()}
     index: dict[str, dict[str, Any]] = {}
     for user in users:
         if not isinstance(user, dict):
             continue
         user_id = str(user.get("id") or "").strip()
         handle = normalize_handle(user.get("handle"))
-        if user_id in participant_ids and handle:
+        if user_id in member_ids and handle:
             index[handle] = user
     return index
 
@@ -247,16 +308,16 @@ def resolve_room_assignee(bootstrap: dict[str, Any], room_id: str, assignee: Any
     if not handle:
         raise TrackingError(f'Room "{room_id}" contains a task with an empty assignee handle')
 
-    participants_by_handle = get_room_participant_index(bootstrap, room_id)
-    user = participants_by_handle.get(handle)
+    members_by_handle = get_room_member_index(bootstrap, room_id)
+    user = members_by_handle.get(handle)
     if user is None:
         raise TrackingError(
-            f'Task assignee "{assignee}" is not a known participant handle in room "{room_id}"'
+            f'Task assignee "{assignee}" is not a known member handle in room "{room_id}"'
         )
     return user
 
 
-def resolve_feishu_mention_id(task: dict[str, Any]) -> str:
+def resolve_simple_dispatch_mention_id(task: dict[str, Any]) -> str:
     explicit = str(task.get("mention_id") or task.get("assignee_id") or "").strip()
     if explicit:
         return explicit
@@ -384,7 +445,7 @@ def decide_tracking_action(
     }
 
 
-def decide_feishu_tracking_action(
+def decide_simple_tracking_action(
     tasks: list[dict[str, Any]],
     *,
     room_id: str,
@@ -417,7 +478,7 @@ def decide_feishu_tracking_action(
         "kind": "dispatch",
         "task": pending_task,
         "text": pending_dispatch_text,
-        "mention_id": resolve_feishu_mention_id(pending_task),
+        "mention_id": resolve_simple_dispatch_mention_id(pending_task),
         "delay_seconds": 0.0 if pending_index == 0 else FEISHU_DISPATCH_DELAY_SECONDS,
         "pending_index": pending_index,
     }
@@ -468,9 +529,6 @@ class CSGClawAPI:
         url: str,
         payload: dict[str, Any] | None,
     ) -> dict[str, Any] | list[dict[str, Any]]:
-        if method == "GET" and path == "/api/v1/workers":
-            return []
-
         if method == "GET" and path == "/api/v1/im/bootstrap":
             return {"current_user_id": "u-admin", "users": [], "rooms": []}
 
@@ -727,22 +785,38 @@ def cmd_start_tracking(args: argparse.Namespace) -> int:
 
 def cmd_run_tracking(args: argparse.Namespace) -> int:
     api = load_api(args)
+    _, log_path = get_tracking_state_paths(args.todo_path)
     read_error_streak = 0
     last_read_error: str | None = None
     last_wait_key: str | None = None
-    last_feishu_pending_index: int | None = None
+    last_simple_pending_index: int | None = None
+    last_dispatch_signature: str | None = None
     terminated = False
+    iteration = 0
+
+    emit_log(
+        log_path,
+        "tracking-run-started",
+        pid=os.getpid(),
+        todo_path=os.path.abspath(os.path.expanduser(args.todo_path)),
+        channel=args.channel,
+        room_id=args.room_id,
+        bot_id=args.bot_id,
+        interval=args.interval,
+        once=bool(args.once),
+        dry_run=bool(args.dry_run),
+        tracker_log_path=str(log_path),
+    )
 
     def handle_termination(signum: int, _frame: Any) -> None:
         nonlocal terminated
         terminated = True
-        print(
-            json.dumps(
-                {"event": "tracking-stopping", "signal": signum, "todo_path": args.todo_path},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            flush=True,
+        emit_log(
+            log_path,
+            "tracking-stopping",
+            signal=signum,
+            todo_path=args.todo_path,
+            iteration=iteration,
         )
 
     signal.signal(signal.SIGTERM, handle_termination)
@@ -750,6 +824,18 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
 
     try:
         while not terminated:
+            iteration += 1
+            emit_log(
+                log_path,
+                "tracking-loop-start",
+                iteration=iteration,
+                channel=args.channel,
+                room_id=args.room_id,
+                todo_path=args.todo_path,
+                last_wait_key=last_wait_key,
+                last_simple_pending_index=last_simple_pending_index,
+                last_dispatch_signature=last_dispatch_signature,
+            )
             try:
                 todo_data = load_json_file(args.todo_path)
                 tasks = load_tasks(todo_data)
@@ -772,32 +858,65 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
                     "streak": read_error_streak,
                 }
                 if error_message != last_read_error:
-                    print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                    emit_log(log_path, "tracking-read-retry", iteration=iteration, **output)
                     last_read_error = error_message
                 time.sleep(args.interval)
                 continue
 
             if read_error_streak:
-                output = {
-                    "event": "tracking-read-recovered",
-                    "todo_path": args.todo_path,
-                    "streak": read_error_streak,
-                }
-                print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                emit_log(
+                    log_path,
+                    "tracking-read-recovered",
+                    iteration=iteration,
+                    todo_path=args.todo_path,
+                    streak=read_error_streak,
+                )
                 read_error_streak = 0
                 last_read_error = None
 
-            if args.channel.strip().lower() == "feishu":
-                decision = decide_feishu_tracking_action(
+            emit_log(
+                log_path,
+                "tracking-tasks-loaded",
+                iteration=iteration,
+                task_count=len(tasks),
+                tasks=summarize_tasks_for_debug(tasks),
+                pending_index=get_pending_task_index(tasks),
+            )
+
+            if args.channel.strip().lower() in ("feishu", "csgclaw"):
+                # Temporary fallback: keep CSGClaw on the same simplified delayed-dispatch
+                # path as Feishu until room message tracking is ready to be enabled again.
+                # The original room-aware CSGClaw sequencing logic remains in
+                # decide_tracking_action() above for future restoration.
+                emit_log(
+                    log_path,
+                    "tracking-decision-mode",
+                    iteration=iteration,
+                    mode="simple",
+                    channel=args.channel,
+                    previous_pending_index=last_simple_pending_index,
+                )
+                decision = decide_simple_tracking_action(
                     tasks,
                     room_id=args.room_id,
                     todo_path=args.todo_path,
                     retry_in_seconds=args.interval,
-                    previous_pending_index=last_feishu_pending_index,
+                    previous_pending_index=last_simple_pending_index,
                 )
             else:
                 messages = api.list_messages(args.channel, args.room_id)
                 bootstrap = api.get_bootstrap()
+                emit_log(
+                    log_path,
+                    "tracking-decision-mode",
+                    iteration=iteration,
+                    mode="room-aware",
+                    channel=args.channel,
+                    message_count=len(messages),
+                    recent_messages=summarize_messages_for_debug(messages),
+                    bootstrap_room_count=len(bootstrap.get("rooms", [])) if isinstance(bootstrap, dict) else None,
+                    bootstrap_user_count=len(bootstrap.get("users", [])) if isinstance(bootstrap, dict) else None,
+                )
                 decision = decide_tracking_action(
                     tasks,
                     messages,
@@ -808,28 +927,51 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
                     retry_in_seconds=args.interval,
                 )
 
+            emit_log(
+                log_path,
+                "tracking-decision",
+                iteration=iteration,
+                decision=decision,
+            )
+
             if decision["kind"] == "complete":
-                output = {
-                    "event": "all-complete",
-                    "todo_path": args.todo_path,
-                    "tasks": [task["id"] for task in tasks],
-                }
-                print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
-                output = {
-                    "event": "tracking-auto-stopped",
-                    "reason": "all-complete",
-                    "todo_path": args.todo_path,
-                }
-                print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
+                emit_log(
+                    log_path,
+                    "all-complete",
+                    iteration=iteration,
+                    todo_path=args.todo_path,
+                    tasks=[task["id"] for task in tasks],
+                )
+                emit_log(
+                    log_path,
+                    "tracking-auto-stopped",
+                    iteration=iteration,
+                    reason="all-complete",
+                    todo_path=args.todo_path,
+                )
                 return 0
 
             if decision["kind"] == "wait":
                 wait_key = str(decision["wait_key"])
                 if wait_key != last_wait_key:
-                    print(json.dumps(decision["output"], ensure_ascii=False, indent=2), flush=True)
+                    emit_log(
+                        log_path,
+                        "tracking-wait",
+                        iteration=iteration,
+                        wait_key=wait_key,
+                        output=decision["output"],
+                    )
                     last_wait_key = wait_key
                 if args.once:
+                    emit_log(log_path, "tracking-once-exit", iteration=iteration, reason="wait")
                     return 0
+                emit_log(
+                    log_path,
+                    "tracking-sleep",
+                    iteration=iteration,
+                    reason="wait",
+                    seconds=args.interval,
+                )
                 time.sleep(args.interval)
                 continue
 
@@ -840,46 +982,100 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
             text = str(decision["text"])
             mention_id = str(decision["mention_id"])
             delay_seconds = float(decision.get("delay_seconds", 0) or 0)
+            dispatch_signature = json.dumps(
+                {
+                    "task_id": pending_task.get("id"),
+                    "mention_id": mention_id,
+                    "text": text,
+                    "channel": args.channel.strip().lower(),
+                    "room_id": args.room_id,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            emit_log(
+                log_path,
+                "tracking-dispatch-prepared",
+                iteration=iteration,
+                task_id=pending_task.get("id"),
+                assignee=pending_task.get("assignee"),
+                mention_id=mention_id,
+                delay_seconds=delay_seconds,
+                pending_index=decision.get("pending_index"),
+                previous_pending_index=last_simple_pending_index,
+                dispatch_signature=dispatch_signature,
+                duplicate_of_last_dispatch=(dispatch_signature == last_dispatch_signature),
+            )
             if delay_seconds > 0:
-                print(
-                    json.dumps(
-                        {
-                            "event": "waiting-before-dispatch",
-                            "task_id": pending_task["id"],
-                            "assignee": pending_task["assignee"],
-                            "todo_path": args.todo_path,
-                            "wait_seconds": delay_seconds,
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                    flush=True,
+                emit_log(
+                    log_path,
+                    "waiting-before-dispatch",
+                    iteration=iteration,
+                    task_id=pending_task["id"],
+                    assignee=pending_task["assignee"],
+                    todo_path=args.todo_path,
+                    wait_seconds=delay_seconds,
                 )
                 time.sleep(delay_seconds)
                 if terminated:
+                    emit_log(
+                        log_path,
+                        "tracking-stopped-before-dispatch",
+                        iteration=iteration,
+                        task_id=pending_task["id"],
+                    )
                     return 0
 
+            emit_log(
+                log_path,
+                "tracking-send-attempt",
+                iteration=iteration,
+                task_id=pending_task.get("id"),
+                mention_id=mention_id,
+                text=text,
+            )
             result = api.send_bot_message(args.channel, args.room_id, args.bot_id, mention_id, text)
-            output = {
-                "event": "dispatched",
-                "task_id": pending_task["id"],
-                "assignee": pending_task["assignee"],
-                "mention_id": mention_id,
-                "todo_path": args.todo_path,
-                "message": result,
-                "text": text,
-            }
-            print(json.dumps(output, ensure_ascii=False, indent=2), flush=True)
-            if args.channel.strip().lower() == "feishu":
-                last_feishu_pending_index = int(decision["pending_index"])
+            emit_log(
+                log_path,
+                "dispatched",
+                iteration=iteration,
+                task_id=pending_task["id"],
+                assignee=pending_task["assignee"],
+                mention_id=mention_id,
+                todo_path=args.todo_path,
+                message=result,
+                text=text,
+            )
+            if args.channel.strip().lower() in ("feishu", "csgclaw"):
+                last_simple_pending_index = int(decision["pending_index"])
+                emit_log(
+                    log_path,
+                    "tracking-simple-state-updated",
+                    iteration=iteration,
+                    last_simple_pending_index=last_simple_pending_index,
+                )
+            last_dispatch_signature = dispatch_signature
             last_wait_key = None
             if args.once:
+                emit_log(log_path, "tracking-once-exit", iteration=iteration, reason="dispatch")
                 return 0
 
+            emit_log(
+                log_path,
+                "tracking-sleep",
+                iteration=iteration,
+                reason="post-dispatch",
+                seconds=args.interval,
+            )
             time.sleep(args.interval)
     except TrackingError as exc:
+        emit_log(log_path, "tracking-error", iteration=iteration, error=str(exc))
         raise SystemExit(str(exc)) from exc
+    except Exception as exc:
+        emit_log(log_path, "tracking-unhandled-error", iteration=iteration, error=repr(exc))
+        raise
     finally:
+        emit_log(log_path, "tracking-run-finished", iteration=iteration, terminated=terminated)
         remove_tracking_state(args.todo_path)
 
 

@@ -13,8 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
@@ -328,12 +326,14 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 
 	peerKind := "direct"
 	content := strings.TrimSpace(evt.Text)
-	if !isFirstInboundBotMentionSelf(content, c.config.BotID) {
-		return
-	}
 	if strings.EqualFold(evt.ChatType, "group") {
 		peerKind = "group"
-		shouldRespond, normalized := c.ShouldRespondInGroup(true, content)
+		isMentioned := hasInboundBotAtMention(content, c.config.BotID)
+		if !isMentioned {
+			return
+		}
+		content = normalizeInboundAtMentions(content)
+		shouldRespond, normalized := c.ShouldRespondInGroup(isMentioned, content)
 		if !shouldRespond {
 			return
 		}
@@ -369,87 +369,79 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 	)
 }
 
-func isFirstInboundBotMentionSelf(content, botID string) bool {
+func hasInboundBotAtMention(content, botID string) bool {
 	content = strings.TrimSpace(content)
-	if content == "" {
+	botID = strings.TrimSpace(botID)
+	if content == "" || botID == "" {
 		return false
 	}
 
-	atIndex, mentionName := firstInboundMention(content)
-	if atIndex < 0 || mentionName == "" {
-		return false
-	}
-
-	for _, candidate := range inboundBotMentionNames(botID) {
-		if candidate != "" && strings.EqualFold(mentionName, candidate) {
+	const prefix = `<at user_id="`
+	searchFrom := 0
+	for {
+		start := strings.Index(content[searchFrom:], prefix)
+		if start < 0 {
+			return false
+		}
+		start += searchFrom + len(prefix)
+		end := strings.IndexByte(content[start:], '"')
+		if end < 0 {
+			return false
+		}
+		if strings.TrimSpace(content[start:start+end]) == botID {
 			return true
 		}
+		searchFrom = start + end + 1
 	}
-	return false
 }
 
-func firstInboundMention(content string) (int, string) {
-	prev := rune(0)
-	for i, r := range content {
-		if r != '@' && r != '＠' {
-			prev = r
-			continue
-		}
-
-		if !isInboundMentionLeftBoundary(prev) {
-			prev = r
-			continue
-		}
-
-		start := i + utf8.RuneLen(r)
-		if start >= len(content) {
-			return -1, ""
-		}
-
-		first, size := utf8.DecodeRuneInString(content[start:])
-		if !isInboundMentionIdentifierRune(first) {
-			return -1, ""
-		}
-
-		end := start + size
-		for end < len(content) {
-			next, nextSize := utf8.DecodeRuneInString(content[end:])
-			if !isInboundMentionIdentifierRune(next) {
-				break
-			}
-			end += nextSize
-		}
-		return i, strings.TrimSpace(content[start:end])
-	}
-	return -1, ""
-}
-
-func isInboundMentionLeftBoundary(r rune) bool {
-	return r == 0 || !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.')
-}
-
-func isInboundMentionIdentifierRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-'
-}
-
-func inboundBotMentionNames(botID string) []string {
-	botID = strings.TrimSpace(botID)
-	if botID == "" {
-		return nil
+func normalizeInboundAtMentions(content string) string {
+	if content == "" {
+		return content
 	}
 
-	names := []string{normalizeInboundMentionName(botID)}
-	if rest, ok := strings.CutPrefix(botID, "u-"); ok && strings.TrimSpace(rest) != "" {
-		names = append(names, normalizeInboundMentionName(rest))
-	}
-	if rest, ok := strings.CutPrefix(botID, "u_"); ok && strings.TrimSpace(rest) != "" {
-		names = append(names, normalizeInboundMentionName(rest))
-	}
-	return names
-}
+	const (
+		openTag  = "<at"
+		closeTag = "</at>"
+	)
 
-func normalizeInboundMentionName(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
+	var builder strings.Builder
+	builder.Grow(len(content))
+
+	searchFrom := 0
+	for {
+		start := strings.Index(content[searchFrom:], openTag)
+		if start < 0 {
+			builder.WriteString(content[searchFrom:])
+			return builder.String()
+		}
+		start += searchFrom
+		builder.WriteString(content[searchFrom:start])
+
+		tagEnd := strings.IndexByte(content[start:], '>')
+		if tagEnd < 0 {
+			builder.WriteString(content[start:])
+			return builder.String()
+		}
+		tagEnd += start
+
+		closeStart := strings.Index(content[tagEnd+1:], closeTag)
+		if closeStart < 0 {
+			builder.WriteString(content[start:])
+			return builder.String()
+		}
+		closeStart += tagEnd + 1
+
+		mentionName := strings.TrimSpace(content[tagEnd+1 : closeStart])
+		if mentionName == "" {
+			builder.WriteString(content[start : closeStart+len(closeTag)])
+		} else {
+			builder.WriteByte('@')
+			builder.WriteString(mentionName)
+		}
+
+		searchFrom = closeStart + len(closeTag)
+	}
 }
 
 func (c *Channel) closeEventStream() {

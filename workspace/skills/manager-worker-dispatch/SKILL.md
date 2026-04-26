@@ -1,15 +1,17 @@
 ---
 name: manager-worker-dispatch
-description: Use this skill to break an admin request into capability-aligned subtasks, provision or reuse workers through csgclaw-cli, write the dispatch plan to todo.json, and start sequential task tracking with manager_worker_api. Do NOT use for generic planning or single-agent execution.
+description: Use this skill only for manager-led multi-worker coordination in CSGClaw. Break a request into capability-aligned subtasks, decide which workers should handle them, prepare `todo.json`, and start sequential task tracking with `manager_worker_api`. Use this when the work must be dispatched across multiple workers with ordered handoff, not for generic planning, single-agent execution, or routine CLI administration.
 ---
 
 # Manager Worker Dispatch
 
-Break an admin request into clear tasks, choose workers by capability, and dispatch them through CSGClaw's real local interfaces in sequence.
+Break a multi-worker admin request into clear tasks, choose workers by capability, and dispatch them through CSGClaw's real local interfaces in sequence.
 
-Use `csgclaw-cli` for room, bot, member, and worker operations.
+Use the `basics` skill for room, bot, and member operations that support the dispatch flow.
 Use `scripts/manager_worker_api.py` only for `start-tracking` and `stop-tracking`.
-Check command help for the current CLI surface instead of writing ad hoc API requests.
+Check the current CLI surface through the `basics` skill instead of writing ad hoc API requests.
+
+If the user only needs a direct CLI action and there is no real dispatch workflow, use the `basics` skill instead of this skill.
 
 ## Fast Path
 
@@ -18,8 +20,8 @@ If the admin explicitly asks the manager to arrange or reuse workers such as `ux
 1. Do not do the implementation work yourself.
 2. Do not use `message` for progress chatter or to restate the request.
 3. Do not use `spawn` or `subagent`.
-4. Run `csgclaw-cli bot list`, reuse matching available workers, and create a worker only if a required capability is missing or the matching worker is `unavailable`.
-5. Ensure every chosen worker has joined the target room and verify this with `csgclaw-cli member list`.
+4. Use the `basics` skill to inspect existing workers, reuse matching available workers, and create a worker only if a required capability is missing or the matching worker is `unavailable`.
+5. Use the `basics` skill to ensure every chosen worker has joined the target room and verify room membership.
 6. Only after all required workers are present in the room, write `todo.json` under `~/.picoclaw/workspace/projects/<slug>/todo.json`.
 7. Only after that room-membership check passes, start tracking with `scripts/manager_worker_api.py start-tracking`.
 8. Send at most one concise final room reply after tracking starts successfully.
@@ -30,8 +32,8 @@ Do not inspect or modify project implementation files before dispatch unless you
 ## Workflow
 
 1. Break the admin request into concrete deliverables.
-2. Match each task to the needed capability; run `csgclaw-cli bot list` first, reuse by matching `description`, and create a worker only when needed or when the matching worker is `unavailable`.
-3. Ensure every required worker has joined the target room, then verify the full required worker set with `csgclaw-cli member list`.
+2. Match each task to the needed capability; use the `basics` skill to inspect existing workers first, reuse by matching `description`, and create a worker only when needed or when the matching worker is `unavailable`.
+3. Use the `basics` skill to ensure every required worker has joined the target room, then verify the full required worker set.
 4. Choose a suitable project directory under `~/.picoclaw/workspace/projects`; create a short slug directory if none fits.
 5. Write or overwrite `todo.json` in that directory as the only source of truth for the current dispatch plan, but only after the room-membership verification succeeds.
 6. Start `scripts/manager_worker_api.py start-tracking` against that `todo.json`, but only after all required workers are confirmed present in the room.
@@ -42,8 +44,8 @@ Do not inspect or modify project implementation files before dispatch unless you
 Room membership is a hard gate before dispatch.
 
 - Determine the complete set of workers required by `todo.json` before starting tracking.
-- Add any missing worker with `csgclaw-cli member create`.
-- After adding workers, run `csgclaw-cli member list --room-id <target_room_id> --channel <current_channel>` and verify every required worker ID/name appears in the target room.
+- Use the `basics` skill to add any missing worker into the room.
+- Use the `basics` skill to verify every required worker ID or name appears in the target room.
 - Do not write the final `todo.json`, run `start-tracking`, or send any assignment/progress message until every required worker is confirmed present in that room.
 - If any required worker is still missing from the room, fix membership first; never rely on `start-tracking` to invite or discover missing workers.
 
@@ -125,41 +127,17 @@ Choose workers by `description`, not just by `role`.
 
 Split cross-capability work into multiple tasks instead of giving one vague package to a single worker.
 
-## Command Usage
+## Dependency on `basics`
 
-Create a room:
+Use the `basics` skill whenever this workflow needs any of these supporting operations:
 
-```bash
-csgclaw-cli room create --title test-room --creator-id ou_xxx --channel <current_channel>
-```
+- create the target room
+- list workers or bots
+- create or recreate a worker bot
+- add a worker into the room
+- verify room membership before tracking
 
-List workers:
-
-```bash
-csgclaw-cli bot list --role worker --channel <current_channel>
-```
-
-If `bot list` shows the needed worker/bot but its status is `unavailable`, do not treat it as reusable yet.
-Run `bot create` again with the same original parameters, including the same `--id`, `--name`, `--role`, `--channel`, and any original `--description` or model options.
-This recreates the missing underlying agent for that bot so it can become `available`.
-
-Create a worker:
-
-```bash
-csgclaw-cli bot create --id u-alex --name alex --role worker --channel <current_channel>
-```
-
-Add a worker into the given room:
-
-```bash
-csgclaw-cli member create --room-id oc_xxx --user-id u-alex --inviter-id u-mananger --channel <current_channel>
-```
-
-Verify all required workers are in the room before tracking:
-
-```bash
-csgclaw-cli member list --room-id oc_xxx --channel <current_channel>
-```
+If a listed worker is `unavailable`, use the `basics` skill to recreate that bot with the same original parameters so the backing agent becomes available again before dispatch.
 
 ## Tracking Script Usage
 
@@ -186,13 +164,13 @@ If you need to direct the human user to the project files on their Mac, point th
 ## Operating Rules
 
 - Reuse available workers before creating new ones.
-- If a matching worker is listed as `unavailable`, recreate it with `bot create` and the original parameters so the backing agent is created before joining or dispatching work to it.
-- Before writing the final `todo.json` or running `start-tracking`, verify all required workers are already members of the target room with `csgclaw-cli member list`.
+- If a matching worker is listed as `unavailable`, use the `basics` skill to recreate it with the original parameters so the backing agent is created before joining or dispatching work to it.
+- Before writing the final `todo.json` or running `start-tracking`, use the `basics` skill to verify all required workers are already members of the target room.
 - Treat missing room membership as a blocker: add the worker, verify again, and only then continue with `todo.json` and tracking.
 - Keep `todo.json` aligned with the actual assignment being dispatched.
 - Do not casually reorder tasks in the sequential flow.
 - Let `start-tracking` drive dispatch from `todo.json`; do not duplicate that logic in manual room-message procedures.
 - While tracking is active, do not manually tell the next worker to start in prose. The tracker is the only sequencer.
 - When a worker finishes, they must reply in the shared room with a normal summary or blocker note; updating `todo.json` alone does not release the next task.
-- Use `csgclaw-cli` for all non-tracking operations; do not use `scripts/manager_worker_api.py` for room, bot, member, worker listing, worker creation, or messaging operations.
+- Route all non-tracking room, bot, and member operations through the `basics` skill; do not use `scripts/manager_worker_api.py` for those operations.
 - If `start-tracking` or `stop-tracking` response shape differs from expectations, patch the script instead of improvising around it.

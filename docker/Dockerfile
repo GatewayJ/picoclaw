@@ -47,7 +47,7 @@ USER picoclaw
 # Run onboard to create initial directories and config
 RUN /usr/local/bin/picoclaw onboard && \
     find /home/picoclaw/.picoclaw/workspace/skills -mindepth 1 -maxdepth 1 \
-      ! -name 'manager-worker-dispatch' -exec rm -rf {} +
+      ! -name 'manager-worker-dispatch' ! -name 'basics' -exec rm -rf {} +
 
 # Bundle the default config into the image
 COPY --chown=picoclaw:picoclaw docker/config/config.json /home/picoclaw/.picoclaw/config.json

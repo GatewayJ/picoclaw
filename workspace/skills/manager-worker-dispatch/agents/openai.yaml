@@ -1,4 +1,4 @@
 interface:
   display_name: "Manager Worker Dispatch"
-  short_description: "Dispatch tasks to workers via API"
-  default_prompt: "Use $manager-worker-dispatch to inspect workers, create missing roles, add them to the room, and assign tasks. Let start-tracking own sequential handoff; workers should reply in-room with results or blockers and should not manually assign the next worker."
+  short_description: "Multi-worker dispatch with tracker sequencing"
+  default_prompt: "Use $manager-worker-dispatch to split work across multiple workers, prepare todo.json, ensure room membership, and let start-tracking own sequential handoff."

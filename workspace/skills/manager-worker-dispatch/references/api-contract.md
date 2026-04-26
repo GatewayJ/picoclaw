@@ -21,42 +21,6 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
 
 ## Expected Endpoints
 
-### List workers
-
-- Method: `GET`
-- Path: `/api/v1/workers`
-- Response shape: top-level JSON array
-
-```json
-[
-  {
-    "id": "u-bob",
-    "name": "bob",
-    "description": "frontend dev",
-    "role": "worker",
-    "status": "running",
-    "created_at": "2026-03-28T12:00:03Z",
-    "model_id": "gpt-4o-mini"
-  }
-]
-```
-
-### Create worker
-
-- Method: `POST`
-- Path: `/api/v1/workers`
-- Request body:
-
-```json
-{
-  "id": "u-alex",
-  "name": "alex",
-  "description": "qa dev",
-  "model_id": "gpt-4o-mini",
-  "role": "worker"
-}
-```
-
 ### Join worker to room
 
 - Method: `POST`
@@ -89,7 +53,7 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
 
 - Method: `GET`
 - Path: `/api/v1/im/bootstrap`
-- Purpose: resolve room participants and assignee handles for tracker sequencing
+- Purpose: resolve room members and assignee handles for tracker sequencing
 
 ### Read room message history
 
@@ -107,6 +71,6 @@ When available, load the CSGClaw API settings from `~/.picoclaw/config.json`:
   updates `passes` to `true`, and
   receives a normal in-room reply from that assignee after the tracker dispatch message.
 - Tool trace messages that start with `🔧` do not count as completion replies.
-- The tracker resolves each gated assignee against real room participant handles; unresolved assignees are treated as tracker errors, not silent skips.
+- The tracker resolves each gated assignee against real room member handles; unresolved assignees are treated as tracker errors, not silent skips.
 - While tracking is active, the tracker is the only sequencer. Manager/worker prose should not manually assign the next worker.
 - Worker provisioning and room membership remain explicit steps through `list-workers`, `create-worker`, and `join-worker`.

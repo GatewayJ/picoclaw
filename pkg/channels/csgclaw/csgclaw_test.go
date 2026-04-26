@@ -92,42 +92,54 @@ func TestChannelReconnectsSSEWithBackoff(t *testing.T) {
 	}
 }
 
-func TestIsFirstInboundBotMentionSelf(t *testing.T) {
+func TestHasInboundBotAtMention(t *testing.T) {
 	tests := []struct {
 		name    string
 		botID   string
 		content string
 		ok      bool
 	}{
-		{name: "space separated mention", botID: "u-manager", content: "@manager good day, isn't it", ok: true},
-		{name: "full bot id also matches", botID: "u-manager", content: "@u-manager hello", ok: true},
-		{name: "colon separated mention", botID: "alice", content: "@alice: hello", ok: true},
-		{name: "full width mention", botID: "小助理", content: "＠小助理：你好", ok: true},
-		{name: "comma separated mention", botID: "bob", content: "@bob, hello", ok: true},
-		{name: "mention in middle also matches", botID: "u-manager", content: "hello @manager", ok: true},
-		{name: "opening paren before mention", botID: "u-manager", content: "(@manager) hello", ok: true},
-		{name: "empty token after at ignored", botID: "u-manager", content: "@ hello @manager", ok: false},
-		{name: "punctuation after at ignored", botID: "u-manager", content: "@: hello @manager", ok: false},
-		{name: "email local part ignored", botID: "u-manager", content: "a@manager.com", ok: false},
-		{name: "inline text before at ignored", botID: "u-manager", content: "foo@manager hello", ok: false},
-		{name: "first mention must be self", botID: "u-manager", content: "@alice hello @manager", ok: false},
-		{name: "first mention self wins", botID: "u-manager", content: "@alice hello @manager @manager", ok: false},
-		{name: "self first with later others", botID: "u-manager", content: "@manager hello @alice", ok: true},
-		{name: "other mention ignored", botID: "u-manager", content: "@alice hello", ok: false},
-		{name: "no mention ignored", botID: "u-manager", content: "hello", ok: false},
+		{name: "matching at tag", botID: "u-manager", content: `<at user_id="u-manager">manager</at> hello`, ok: true},
+		{name: "other at tag ignored", botID: "u-manager", content: `<at user_id="alice">alice</at> hello`, ok: false},
+		{name: "later matching at tag works", botID: "u-manager", content: `<at user_id="alice">alice</at> <at user_id="u-manager">manager</at> hello`, ok: true},
+		{name: "plain at text ignored", botID: "u-manager", content: "@manager hello", ok: false},
+		{name: "missing quote ignored", botID: "u-manager", content: `<at user_id="u-manager>manager</at>`, ok: false},
+		{name: "empty content ignored", botID: "u-manager", content: "", ok: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ok := isFirstInboundBotMentionSelf(tt.content, tt.botID)
+			ok := hasInboundBotAtMention(tt.content, tt.botID)
 			if ok != tt.ok {
-				t.Fatalf("isFirstInboundBotMentionSelf(%q, %q) = %v, want %v", tt.content, tt.botID, ok, tt.ok)
+				t.Fatalf("hasInboundBotAtMention(%q, %q) = %v, want %v", tt.content, tt.botID, ok, tt.ok)
 			}
 		})
 	}
 }
 
-func TestHandleInboundEventIgnoresNonBotMentions(t *testing.T) {
+func TestNormalizeInboundAtMentions(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "single mention", content: `<at user_id="u-manager">manager</at> hi`, want: `@manager hi`},
+		{name: "multiple mentions", content: `<at user_id="alice">alice</at> hi <at user_id="u-manager">manager</at>`, want: `@alice hi @manager`},
+		{name: "empty mention name keeps original tag", content: `<at user_id="u-manager"></at> hi`, want: `<at user_id="u-manager"></at> hi`},
+		{name: "broken tag keeps tail", content: `<at user_id="u-manager">manager hi`, want: `<at user_id="u-manager">manager hi`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeInboundAtMentions(tt.content)
+			if got != tt.want {
+				t.Fatalf("normalizeInboundAtMentions(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleInboundEventDirectAlwaysProcesses(t *testing.T) {
 	mb := bus.NewMessageBus()
 	defer mb.Close()
 
@@ -151,13 +163,93 @@ func TestHandleInboundEventIgnoresNonBotMentions(t *testing.T) {
 		Sender: sender{
 			ID: "user-1",
 		},
-		Text: "@alice hello",
+		Text: "hello",
+	})
+
+	select {
+	case msg := <-mb.InboundChan():
+		if msg.ChatID != "room-1" {
+			t.Fatalf("inbound chat ID = %q, want %q", msg.ChatID, "room-1")
+		}
+		if msg.Content != "hello" {
+			t.Fatalf("inbound content = %q, want %q", msg.Content, "hello")
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("timed out waiting for inbound message")
+	}
+}
+
+func TestHandleInboundEventGroupIgnoresNonBotMention(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	ch, err := NewChannel(config.CSGClawConfig{
+		BaseURL:     "http://127.0.0.1:18080",
+		BotID:       "u-manager",
+		AccessToken: "secret",
+	}, mb)
+	if err != nil {
+		t.Fatalf("NewChannel() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch.ctx = ctx
+
+	ch.handleInboundEvent(eventPayload{
+		MessageID: "msg-1",
+		RoomID:    "room-1",
+		ChatType:  "group",
+		Sender: sender{
+			ID: "user-1",
+		},
+		Text: `<at user_id="alice">alice</at> hello`,
 	})
 
 	select {
 	case msg := <-mb.InboundChan():
 		t.Fatalf("unexpected inbound message published: %+v", msg)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHandleInboundEventGroupProcessesBotMention(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	ch, err := NewChannel(config.CSGClawConfig{
+		BaseURL:     "http://127.0.0.1:18080",
+		BotID:       "u-manager",
+		AccessToken: "secret",
+	}, mb)
+	if err != nil {
+		t.Fatalf("NewChannel() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch.ctx = ctx
+
+	ch.handleInboundEvent(eventPayload{
+		MessageID: "msg-1",
+		RoomID:    "room-1",
+		ChatType:  "group",
+		Sender: sender{
+			ID: "user-1",
+		},
+		Text: `<at user_id="u-manager">manager</at> hi`,
+	})
+
+	select {
+	case msg := <-mb.InboundChan():
+		if msg.ChatID != "room-1" {
+			t.Fatalf("inbound chat ID = %q, want %q", msg.ChatID, "room-1")
+		}
+		if msg.Content != `@manager hi` {
+			t.Fatalf("inbound content = %q, want %q", msg.Content, `@manager hi`)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("timed out waiting for inbound message")
 	}
 }
 
@@ -185,7 +277,7 @@ func TestHandleInboundEventConsumesRoomIDPayload(t *testing.T) {
 		Sender: sender{
 			ID: "user-1",
 		},
-		Text: "@manager hi",
+		Text: "hi",
 	})
 
 	select {
@@ -193,8 +285,8 @@ func TestHandleInboundEventConsumesRoomIDPayload(t *testing.T) {
 		if msg.ChatID != "room-1" {
 			t.Fatalf("inbound chat ID = %q, want %q", msg.ChatID, "room-1")
 		}
-		if msg.Content != "@manager hi" {
-			t.Fatalf("inbound content = %q, want %q", msg.Content, "@manager hi")
+		if msg.Content != "hi" {
+			t.Fatalf("inbound content = %q, want %q", msg.Content, "hi")
 		}
 	case <-time.After(50 * time.Millisecond):
 		t.Fatal("timed out waiting for inbound message")
