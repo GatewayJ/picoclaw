@@ -851,7 +851,6 @@ def cmd_run_tracking(args: argparse.Namespace) -> int:
 
                 read_error_streak += 1
                 output = {
-                    "event": "tracking-read-retry",
                     "todo_path": args.todo_path,
                     "error": error_message,
                     "retry_in_seconds": args.interval,

@@ -320,6 +320,10 @@ func (c *Channel) dispatchEvent(eventType, raw string) {
 }
 
 func (c *Channel) handleInboundEvent(evt eventPayload) {
+	logger.DebugCF("csgclaw", "Received inbound event", map[string]any{
+		"event": evt,
+	})
+
 	if strings.TrimSpace(evt.RoomID) == "" || strings.TrimSpace(evt.Sender.ID) == "" {
 		return
 	}
@@ -329,9 +333,6 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 	if strings.EqualFold(evt.ChatType, "group") {
 		peerKind = "group"
 		isMentioned := hasInboundBotAtMention(content, c.config.BotID)
-		if !isMentioned {
-			return
-		}
 		content = normalizeInboundAtMentions(content)
 		shouldRespond, normalized := c.ShouldRespondInGroup(isMentioned, content)
 		if !shouldRespond {
