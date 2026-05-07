@@ -1,9 +1,22 @@
+# Base images mirrored to ACR (opencsg_public) so CI can pull without Docker Hub.
+# Host: opencsg-registry.cn-beijing.cr.aliyuncs.com — push local pulls with:
+#   docker tag golang:1.25-alpine .../opencsg_public/golang:1.25-alpine
+#   docker tag alpine:3.23 .../opencsg_public/alpine:3.23
+#
 # ============================================================
 # Stage 1: Build the picoclaw binary
 # ============================================================
-FROM golang:1.25-alpine AS builder
+FROM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/golang:1.25-alpine AS builder
+
+# Alpine apk: use Aliyun mirror instead of dl-cdn (often slow or flaky in mainland CN).
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 RUN apk add --no-cache git make
+
+# Go modules: default proxy/sumdb can be slow or unreachable in CN.
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
+ENV GIT_TERMINAL_PROMPT=0
 
 WORKDIR /src
 
@@ -25,7 +38,9 @@ COPY docker/csgclaw-cli/csgclaw-cli_linux_${TARGETARCH} /csgclaw-cli
 # ============================================================
 # Stage 2: Minimal runtime image
 # ============================================================
-FROM alpine:3.23
+FROM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/alpine:3.23
+
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 RUN apk add --no-cache ca-certificates curl python3 tini tzdata
 
@@ -54,4 +69,5 @@ COPY --chown=picoclaw:picoclaw docker/config/config.json /home/picoclaw/.picocla
 
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["sleep", "infinity"]
+
 # CMD ["picoclaw", "gateway", "-d"]
