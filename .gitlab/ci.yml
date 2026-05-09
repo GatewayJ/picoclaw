@@ -18,6 +18,12 @@
 #   docker push ${ACR_REGISTRY}/opencsg_public/binfmt:latest
 # Or set CI variable SKIP_BINFMT_INSTALL=true if the GitLab Runner host already
 # has binfmt_misc + qemu-user registered for arm64.
+#
+# BuildKit (docker-container driver): buildx bootstrap pulls moby/buildkit from
+# Docker Hub by default — mirror to ACR and set BUILDKIT_CI_IMAGE, e.g.:
+#   docker pull moby/buildkit:buildx-stable-1
+#   docker tag moby/buildkit:buildx-stable-1 ${ACR_REGISTRY}/opencsg_public/moby-buildkit:buildx-stable-1
+#   docker push ${ACR_REGISTRY}/opencsg_public/moby-buildkit:buildx-stable-1
 
 variables:
   DOCKER_TLS_CERTDIR: "/certs"
@@ -27,6 +33,7 @@ variables:
   BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
   DOCKER_PLATFORMS: "linux/amd64,linux/arm64"
   BINFMT_IMAGE: "${ACR_REGISTRY}/opencsg_public/binfmt:latest"
+  BUILDKIT_CI_IMAGE: "${ACR_REGISTRY}/opencsg_public/moby-buildkit:buildx-stable-1"
 
 stages:
   - build
@@ -67,7 +74,8 @@ docker-build-push:
       fi
     - export BUILDX_BUILDER="picoclaw-mx-${CI_PIPELINE_ID}"
     - docker buildx rm "${BUILDX_BUILDER}" 2>/dev/null || true
-    - docker buildx create --name "${BUILDX_BUILDER}" --driver docker-container --bootstrap --use
+    - echo "BuildKit image for buildx driver ${BUILDKIT_CI_IMAGE}"
+    - docker buildx create --name "${BUILDX_BUILDER}" --driver docker-container --driver-opt "image=${BUILDKIT_CI_IMAGE}" --bootstrap --use
   script:
     - |
       set -euo pipefail
