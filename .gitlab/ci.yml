@@ -10,7 +10,14 @@
 #   ACR_REGISTRY, ACR_USERNAME, ACR_PASSWORD
 #
 # Tag: YYYY.M.D (Asia/Shanghai). Multi-arch: manifest list for linux/amd64 + linux/arm64.
-# Optional: BINFMT_IMAGE if tonistiigi/binfmt cannot be pulled (mirror to ACR).
+#
+# Binfmt (QEMU): Docker Hub (tonistiigi/binfmt) is often blocked in CN CI. Default
+# BINFMT_IMAGE points at ACR — mirror once, e.g.:
+#   docker pull tonistiigi/binfmt:latest
+#   docker tag tonistiigi/binfmt:latest ${ACR_REGISTRY}/opencsg_public/binfmt:latest
+#   docker push ${ACR_REGISTRY}/opencsg_public/binfmt:latest
+# Or set CI variable SKIP_BINFMT_INSTALL=true if the GitLab Runner host already
+# has binfmt_misc + qemu-user registered for arm64.
 
 variables:
   DOCKER_TLS_CERTDIR: "/certs"
@@ -19,7 +26,7 @@ variables:
   DOCKER_BUILDKIT: "1"
   BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
   DOCKER_PLATFORMS: "linux/amd64,linux/arm64"
-  BINFMT_IMAGE: "tonistiigi/binfmt:latest"
+  BINFMT_IMAGE: "${ACR_REGISTRY}/opencsg_public/binfmt:latest"
 
 stages:
   - build
@@ -50,7 +57,14 @@ docker-build-push:
     - echo "IMAGE_TAG=${IMAGE_TAG}" && echo "DOCKER_IMAGE=${DOCKER_IMAGE}"
     - docker info
     - docker buildx version
-    - docker run --rm --privileged "${BINFMT_IMAGE}" --install all
+    - |
+      set -eu
+      if [ "${SKIP_BINFMT_INSTALL:-}" = "true" ] || [ "${SKIP_BINFMT_INSTALL:-}" = "1" ]; then
+        echo "SKIP_BINFMT_INSTALL: skip binfmt container (runner host must already support foreign arch RUN)"
+      else
+        echo "Installing binfmt from ${BINFMT_IMAGE}"
+        docker run --rm --privileged "${BINFMT_IMAGE}" --install all
+      fi
     - export BUILDX_BUILDER="picoclaw-mx-${CI_PIPELINE_ID}"
     - docker buildx rm "${BUILDX_BUILDER}" 2>/dev/null || true
     - docker buildx create --name "${BUILDX_BUILDER}" --driver docker-container --bootstrap --use
@@ -61,6 +75,8 @@ docker-build-push:
         --platform "${DOCKER_PLATFORMS}" \
         -f docker/Dockerfile \
         -t "${DOCKER_IMAGE}:${IMAGE_TAG}" \
+        --provenance=false \
+        --sbom=false \
         --push \
         .
   after_script:
