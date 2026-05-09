@@ -41,9 +41,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
   ln -s /root/.local/bin/uvx /usr/local/bin/uvx && \
   uv --version
 
-# Health check
+# Health check (127.0.0.1: gateway is IPv4-only; localhost may resolve to ::1)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -q --spider http://localhost:18790/health || exit 1
+  CMD wget -q --spider http://127.0.0.1:18790/health || exit 1
 
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw

@@ -44,9 +44,9 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 RUN apk add --no-cache ca-certificates curl python3 tini tzdata
 
-# Health check
+# Health check (use 127.0.0.1: gateway listens on IPv4 only; "localhost" may resolve to ::1 and fail)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -q --spider http://localhost:18790/health || exit 1
+  CMD wget -q --spider http://127.0.0.1:18790/health || exit 1
 
 # Copy binary
 COPY --from=builder /src/build/picoclaw /usr/local/bin/picoclaw
