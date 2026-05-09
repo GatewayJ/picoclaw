@@ -29,11 +29,22 @@ COPY . .
 RUN make build
 
 # ============================================================
-# Stage 1.5: Select the platform-specific csgclaw-cli binary
+# Stage 1.5: Download platform-specific csgclaw-cli release tarball
 # ============================================================
-FROM scratch AS csgclaw-cli
+FROM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/alpine:3.23 AS csgclaw-cli
 ARG TARGETARCH
-COPY docker/csgclaw-cli/csgclaw-cli_linux_${TARGETARCH} /csgclaw-cli
+# Override to pin a release, e.g. https://csgclaw.opencsg.com/releases/v1.0.0
+ARG CSGCLAW_CLI_BASE_URL=https://csgclaw.opencsg.com/releases/latest
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
+  && apk add --no-cache ca-certificates curl \
+  && curl -fSL "${CSGCLAW_CLI_BASE_URL}/linux/${TARGETARCH}?package=csgclaw-cli" -o /tmp/csgclaw-cli.tar.gz \
+  && mkdir -p /tmp/extract \
+  && tar -xzf /tmp/csgclaw-cli.tar.gz -C /tmp/extract \
+  && set -eu; \
+     bin="$(find /tmp/extract -type f \( -name csgclaw-cli -o -name "csgclaw-cli_linux_${TARGETARCH}" \) | head -n1)"; \
+     if [ -z "$bin" ]; then bin="$(find /tmp/extract -type f -perm -111 | head -n1)"; fi; \
+     if [ -z "$bin" ]; then echo "csgclaw-cli binary not found in archive"; ls -laR /tmp/extract; exit 1; fi; \
+     install -m0755 "$bin" /csgclaw-cli
 
 # ============================================================
 # Stage 2: Minimal runtime image
