@@ -1,27 +1,25 @@
 # GitLab CI: build Docker image and push to Alibaba Cloud ACR.
-# Triggers: branch `add-csgclaw-channel-ci-test` (path `changes` commented out for testing).
+# Config path: .gitlab/ci.yml — set in Project → Settings → CI/CD → General pipelines
+# → "CI/CD configuration file" (GitLab does not auto-detect this path).
 #
-# Runner: use a GitLab Runner with docker executor. For Docker-in-Docker (this job),
-# set privileged = true in the runner's config.toml ([runners.docker]), not in
-# this file. Optionally add `tags:` to pin a specific runner.
+# Runner: docker executor + privileged dind (see [runners.docker] privileged = true).
 #
-# CI images are pulled from ACR (${ACR_REGISTRY}/opencsg_public/...) instead of
-# Docker Hub to avoid registry-1.docker.io timeouts in restricted networks.
+# CI job images from ACR (${ACR_REGISTRY}/opencsg_public/...) to avoid Docker Hub timeouts.
 #
-# Required CI/CD variables (Settings → CI/CD → Variables):
-#   ACR_REGISTRY – registry host only, e.g. opencsg-registry.cn-beijing.cr.aliyuncs.com
-#   ACR_USERNAME – ACR login name
-#   ACR_PASSWORD – ACR password or temporary token
+# Required CI/CD variables:
+#   ACR_REGISTRY, ACR_USERNAME, ACR_PASSWORD
 #
-# Tag format: YYYY.M.D (Asia/Shanghai calendar day, no per-day build index).
-#
-# Project setting: Settings → CI/CD → General pipelines → CI/CD configuration file
-# must be set to this path: .gitlab/ci.yml (GitLab does not auto-detect it).
+# Tag: YYYY.M.D (Asia/Shanghai). Multi-arch: manifest list for linux/amd64 + linux/arm64.
+# Optional: BINFMT_IMAGE if tonistiigi/binfmt cannot be pulled (mirror to ACR).
 
 variables:
   DOCKER_TLS_CERTDIR: "/certs"
   GIT_STRATEGY: clone
   GIT_DEPTH: "0"
+  DOCKER_BUILDKIT: "1"
+  BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+  DOCKER_PLATFORMS: "linux/amd64,linux/arm64"
+  BINFMT_IMAGE: "tonistiigi/binfmt:latest"
 
 stages:
   - build
@@ -32,7 +30,6 @@ docker-build-push:
     name: ${ACR_REGISTRY}/opencsg_public/docker-ci:v1.0.1
     entrypoint: [""]
   services:
-    # Same mirror as internal docker-ci template (avoid Docker Hub).
     - name: ${ACR_REGISTRY}/opencsg_public/docker:27.3-dind
       command: ["--feature=containerd-snapshotter", "--experimental"]
       alias: docker
@@ -51,6 +48,20 @@ docker-build-push:
     - export IMAGE_TAG="$(date +%Y).$(date +%-m).$(date +%-d)"
     - export DOCKER_IMAGE="${ACR_REGISTRY}/opencsghq/picoclaw"
     - echo "IMAGE_TAG=${IMAGE_TAG}" && echo "DOCKER_IMAGE=${DOCKER_IMAGE}"
+    - docker info
+    - docker buildx version
+    - docker run --rm --privileged "${BINFMT_IMAGE}" --install all
+    - export BUILDX_BUILDER="picoclaw-mx-${CI_PIPELINE_ID}"
+    - docker buildx rm "${BUILDX_BUILDER}" 2>/dev/null || true
+    - docker buildx create --name "${BUILDX_BUILDER}" --driver docker-container --bootstrap --use
   script:
-    - docker build -f docker/Dockerfile -t "${DOCKER_IMAGE}:${IMAGE_TAG}" .
-    - docker push "${DOCKER_IMAGE}:${IMAGE_TAG}"
+    - |
+      set -euo pipefail
+      docker buildx build \
+        --platform "${DOCKER_PLATFORMS}" \
+        -f docker/Dockerfile \
+        -t "${DOCKER_IMAGE}:${IMAGE_TAG}" \
+        --push \
+        .
+  after_script:
+    - docker buildx rm "picoclaw-mx-${CI_PIPELINE_ID}" 2>/dev/null || true
