@@ -1,12 +1,15 @@
-# Base images mirrored to ACR (opencsg_public) so CI can pull without Docker Hub.
-# Host: opencsg-registry.cn-beijing.cr.aliyuncs.com — push local pulls with:
-#   docker tag golang:1.25-alpine .../opencsg_public/golang:1.25-alpine
-#   docker tag alpine:3.23 .../opencsg_public/alpine:3.23
+# Base images mirrored to ACR (opencsghq) with full upstream multi-arch indexes
+# so CI can pull without Docker Hub while preserving linux/amd64 and linux/arm64.
 #
+ARG RUNTIME_ALPINE_BASE_IMAGE=opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/alpine:3.23
+
 # ============================================================
 # Stage 1: Build the picoclaw binary
 # ============================================================
-FROM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/golang:1.25-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 
 # Alpine apk: use Aliyun mirror instead of dl-cdn (often slow or flaky in mainland CN).
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
@@ -26,22 +29,37 @@ RUN go mod download
 
 # Copy source and build
 COPY . .
-RUN make build
+RUN set -eux; \
+  targetos="${TARGETOS:-linux}"; \
+  targetarch="${TARGETARCH:-$(go env GOARCH)}"; \
+  case "${targetarch}/${TARGETVARIANT:-}" in \
+    arm/v*) export GOARM="${TARGETVARIANT#v}" ;; \
+  esac; \
+  make build GO="CGO_ENABLED=0 GOOS=${targetos} GOARCH=${targetarch} go" PLATFORM="${targetos}" ARCH="${targetarch}"
 
 # ============================================================
 # Stage 1.5: Download platform-specific csgclaw-cli release tarball
 # ============================================================
-FROM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/alpine:3.23 AS csgclaw-cli
+FROM --platform=$BUILDPLATFORM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/alpine:3.23 AS csgclaw-cli
 ARG TARGETARCH
 # Override to pin a release, e.g. https://csgclaw.opencsg.com/releases/v1.0.0
 ARG CSGCLAW_CLI_BASE_URL=https://csgclaw.opencsg.com/releases/latest
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
   && apk add --no-cache ca-certificates curl \
-  && curl -fSL "${CSGCLAW_CLI_BASE_URL}/linux/${TARGETARCH}?package=csgclaw-cli" -o /tmp/csgclaw-cli.tar.gz \
+  && set -eu; \
+     arch="${TARGETARCH:-}"; \
+     if [ -z "$arch" ]; then \
+       case "$(uname -m)" in \
+         x86_64) arch=amd64 ;; \
+         aarch64) arch=arm64 ;; \
+         *) echo "unsupported build arch: $(uname -m)" >&2; exit 1 ;; \
+       esac; \
+     fi; \
+     curl -fSL "${CSGCLAW_CLI_BASE_URL}/linux/${arch}?package=csgclaw-cli" -o /tmp/csgclaw-cli.tar.gz \
   && mkdir -p /tmp/extract \
   && tar -xzf /tmp/csgclaw-cli.tar.gz -C /tmp/extract \
   && set -eu; \
-     bin="$(find /tmp/extract -type f \( -name csgclaw-cli -o -name "csgclaw-cli_linux_${TARGETARCH}" \) | head -n1)"; \
+     bin="$(find /tmp/extract -type f \( -name csgclaw-cli -o -name "csgclaw-cli_linux_${arch}" \) | head -n1)"; \
      if [ -z "$bin" ]; then bin="$(find /tmp/extract -type f -perm -111 | head -n1)"; fi; \
      if [ -z "$bin" ]; then echo "csgclaw-cli binary not found in archive"; ls -laR /tmp/extract; exit 1; fi; \
      install -m0755 "$bin" /csgclaw-cli
@@ -49,7 +67,7 @@ RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 # ============================================================
 # Stage 2: Minimal runtime image
 # ============================================================
-FROM opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/alpine:3.23
+FROM ${RUNTIME_ALPINE_BASE_IMAGE}
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 

@@ -5,6 +5,8 @@
 # Runner: docker executor + privileged dind (see [runners.docker] privileged = true).
 #
 # CI job images from ACR (${ACR_REGISTRY}/opencsg_public/...) to avoid Docker Hub timeouts.
+# Dockerfile builder/runtime bases use opencsghq ACR mirrors that preserve the
+# upstream multi-arch indexes for linux/amd64 and linux/arm64.
 #
 # Required CI/CD variables:
 #   ACR_REGISTRY, ACR_USERNAME, ACR_PASSWORD
@@ -32,6 +34,7 @@ variables:
   DOCKER_BUILDKIT: "1"
   BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
   DOCKER_PLATFORMS: "linux/amd64,linux/arm64"
+  RUNTIME_ALPINE_BASE_IMAGE: "opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/alpine:3.23"
   BINFMT_IMAGE: "${ACR_REGISTRY}/opencsg_public/binfmt:latest"
   BUILDKIT_CI_IMAGE: "${ACR_REGISTRY}/opencsg_public/moby-buildkit:buildx-stable-1"
 
@@ -53,6 +56,7 @@ docker-build-push:
         - docker/csgclaw-cli/**/*
         - docker/csgclaw-cli/*
         - docker/Dockerfile
+        - .gitlab/ci.yml
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
@@ -76,16 +80,37 @@ docker-build-push:
     - docker buildx rm "${BUILDX_BUILDER}" 2>/dev/null || true
     - echo "BuildKit image for buildx driver ${BUILDKIT_CI_IMAGE}"
     - docker buildx create --name "${BUILDX_BUILDER}" --driver docker-container --driver-opt "image=${BUILDKIT_CI_IMAGE}" --bootstrap --use
+    - |
+      set -euo pipefail
+      echo "Checking runtime base image platforms: ${RUNTIME_ALPINE_BASE_IMAGE}"
+      docker buildx imagetools inspect "${RUNTIME_ALPINE_BASE_IMAGE}" | tee /tmp/runtime-alpine-manifest.txt
+      grep -Eq 'Platform:[[:space:]]+linux/amd64' /tmp/runtime-alpine-manifest.txt
+      grep -Eq 'Platform:[[:space:]]+linux/arm64' /tmp/runtime-alpine-manifest.txt
   script:
     - |
       set -euo pipefail
       docker buildx build \
         --platform "${DOCKER_PLATFORMS}" \
         -f docker/Dockerfile \
+        --build-arg "RUNTIME_ALPINE_BASE_IMAGE=${RUNTIME_ALPINE_BASE_IMAGE}" \
         -t "${DOCKER_IMAGE}:${IMAGE_TAG}" \
         --provenance=false \
         --sbom=false \
         --push \
         .
+    - |
+      set -euo pipefail
+      docker buildx imagetools inspect "${DOCKER_IMAGE}:${IMAGE_TAG}"
+      for entry in "linux/amd64:x86_64" "linux/arm64:aarch64"; do
+        platform="${entry%%:*}"
+        expected_arch="${entry##*:}"
+        echo "Validating ${DOCKER_IMAGE}:${IMAGE_TAG} on ${platform}"
+        docker run --rm --platform "${platform}" --entrypoint /bin/sh "${DOCKER_IMAGE}:${IMAGE_TAG}" -ec "
+          test \"\$(uname -m)\" = \"${expected_arch}\"
+          /sbin/tini --version >/dev/null
+          /usr/local/bin/picoclaw version >/dev/null
+          /usr/local/bin/csgclaw-cli --help >/dev/null
+        "
+      done
   after_script:
     - docker buildx rm "picoclaw-mx-${CI_PIPELINE_ID}" 2>/dev/null || true
