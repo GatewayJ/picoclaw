@@ -52,11 +52,6 @@ docker-build-push:
       alias: docker
   rules:
     - if: $CI_COMMIT_BRANCH == "add-csgclaw-channel"
-      changes:
-        - docker/csgclaw-cli/**/*
-        - docker/csgclaw-cli/*
-        - docker/Dockerfile
-        - .gitlab/ci.yml
   variables:
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
