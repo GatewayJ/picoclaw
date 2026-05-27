@@ -2,7 +2,9 @@ package csgclaw
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -250,6 +252,112 @@ func TestHandleInboundEventGroupProcessesBotMention(t *testing.T) {
 		}
 	case <-time.After(50 * time.Millisecond):
 		t.Fatal("timed out waiting for inbound message")
+	}
+}
+
+func TestHandleInboundEventThreadUsesTopicChatID(t *testing.T) {
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	ch, err := NewChannel(config.CSGClawConfig{
+		BaseURL:     "http://127.0.0.1:18080",
+		BotID:       "u-manager",
+		AccessToken: "secret",
+	}, mb)
+	if err != nil {
+		t.Fatalf("NewChannel() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch.ctx = ctx
+
+	ch.dispatchEvent("message", `{"message_id":"msg-reply","room_id":"room-1","chat_type":"group","thread_root_id":"msg-root","sender":{"id":"user-1"},"text":"<at user_id=\"u-manager\">manager</at> hi","context":{"topic_id":"msg-root"}}`)
+
+	select {
+	case msg := <-mb.InboundChan():
+		if msg.ChatID != "room-1/msg-root" {
+			t.Fatalf("inbound chat ID = %q, want %q", msg.ChatID, "room-1/msg-root")
+		}
+		if msg.Peer.Kind != "group" {
+			t.Fatalf("peer kind = %q, want group", msg.Peer.Kind)
+		}
+		if msg.Peer.ID != "room-1/msg-root" {
+			t.Fatalf("peer ID = %q, want %q", msg.Peer.ID, "room-1/msg-root")
+		}
+		if msg.Metadata["room_id"] != "room-1" {
+			t.Fatalf("metadata room_id = %q, want room-1", msg.Metadata["room_id"])
+		}
+		if msg.Metadata["topic_id"] != "msg-root" {
+			t.Fatalf("metadata topic_id = %q, want msg-root", msg.Metadata["topic_id"])
+		}
+		if msg.Metadata["parent_peer_kind"] != "topic" {
+			t.Fatalf("metadata parent_peer_kind = %q, want topic", msg.Metadata["parent_peer_kind"])
+		}
+		if msg.Metadata["parent_peer_id"] != "msg-root" {
+			t.Fatalf("metadata parent_peer_id = %q, want msg-root", msg.Metadata["parent_peer_id"])
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("timed out waiting for inbound message")
+	}
+}
+
+func TestSendThreadMessageIncludesTopicContext(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/bots/u-manager/messages/send" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("Unmarshal(%s) error = %v", string(body), err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	mb := bus.NewMessageBus()
+	defer mb.Close()
+
+	ch, err := NewChannel(config.CSGClawConfig{
+		BaseURL:     server.URL,
+		BotID:       "u-manager",
+		AccessToken: "secret",
+	}, mb)
+	if err != nil {
+		t.Fatalf("NewChannel() error = %v", err)
+	}
+	ch.SetRunning(true)
+
+	if err := ch.Send(context.Background(), bus.OutboundMessage{
+		ChatID:  "room-1/msg-root",
+		Content: "thread answer",
+	}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	if got["room_id"] != "room-1" {
+		t.Fatalf("room_id = %v, want room-1; payload=%v", got["room_id"], got)
+	}
+	if got["text"] != "thread answer" {
+		t.Fatalf("text = %v, want thread answer; payload=%v", got["text"], got)
+	}
+	if got["topic_id"] != "msg-root" {
+		t.Fatalf("topic_id = %v, want msg-root; payload=%v", got["topic_id"], got)
+	}
+	contextPayload, ok := got["context"].(map[string]any)
+	if !ok {
+		t.Fatalf("context = %T, want object; payload=%v", got["context"], got)
+	}
+	if contextPayload["chat_id"] != "room-1" {
+		t.Fatalf("context.chat_id = %v, want room-1; payload=%v", contextPayload["chat_id"], got)
+	}
+	if contextPayload["topic_id"] != "msg-root" {
+		t.Fatalf("context.topic_id = %v, want msg-root; payload=%v", contextPayload["topic_id"], got)
 	}
 }
 

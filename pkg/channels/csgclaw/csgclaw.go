@@ -44,13 +44,23 @@ type Channel struct {
 }
 
 type eventPayload struct {
-	MessageID string   `json:"message_id"`
-	RoomID    string   `json:"room_id"`
-	ChatType  string   `json:"chat_type"`
-	Sender    sender   `json:"sender"`
-	Text      string   `json:"text"`
-	Timestamp string   `json:"timestamp"`
-	Mentions  []string `json:"mentions"`
+	MessageID    string       `json:"message_id"`
+	RoomID       string       `json:"room_id"`
+	ChatID       string       `json:"chat_id"`
+	ChatType     string       `json:"chat_type"`
+	ThreadRootID string       `json:"thread_root_id"`
+	Sender       sender       `json:"sender"`
+	Text         string       `json:"text"`
+	Timestamp    string       `json:"timestamp"`
+	Mentions     []string     `json:"mentions"`
+	Context      eventContext `json:"context"`
+}
+
+type eventContext struct {
+	Channel  string `json:"channel"`
+	ChatID   string `json:"chat_id"`
+	ChatType string `json:"chat_type"`
+	TopicID  string `json:"topic_id"`
 }
 
 type sender struct {
@@ -60,8 +70,16 @@ type sender struct {
 }
 
 type sendRequest struct {
-	RoomID string `json:"room_id"`
-	Text   string `json:"text"`
+	RoomID  string       `json:"room_id"`
+	Text    string       `json:"text"`
+	TopicID string       `json:"topic_id,omitempty"`
+	Context *sendContext `json:"context,omitempty"`
+}
+
+type sendContext struct {
+	Channel string `json:"channel,omitempty"`
+	ChatID  string `json:"chat_id,omitempty"`
+	TopicID string `json:"topic_id,omitempty"`
 }
 
 func NewChannel(cfg config.CSGClawConfig, messageBus *bus.MessageBus) (*Channel, error) {
@@ -125,8 +143,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 	if !c.IsRunning() {
 		return channels.ErrNotRunning
 	}
-	fmt.Printf("received msg: %+v\n", msg)
-	roomID := msg.ChatID
+	roomID, topicID := splitTopicChatID(msg.ChatID)
 	if strings.TrimSpace(roomID) == "" {
 		return fmt.Errorf("csgclaw chat ID is empty: %w", channels.ErrSendFailed)
 	}
@@ -134,10 +151,20 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 		return fmt.Errorf("csgclaw content is empty: %w", channels.ErrSendFailed)
 	}
 
-	body, err := json.Marshal(sendRequest{
+	payload := sendRequest{
 		RoomID: roomID,
 		Text:   msg.Content,
-	})
+	}
+	if topicID != "" {
+		payload.TopicID = topicID
+		payload.Context = &sendContext{
+			Channel: "csgclaw",
+			ChatID:  roomID,
+			TopicID: topicID,
+		}
+	}
+
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("csgclaw marshal send payload: %w", channels.ErrSendFailed)
 	}
@@ -151,6 +178,7 @@ func (c *Channel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 
 	logger.InfoCF("csgclaw", "Sending outbound message", map[string]any{
 		"room_id":      roomID,
+		"topic_id":     topicID,
 		"content_len":  len(msg.Content),
 		"endpoint_url": c.sendURL(),
 	})
@@ -324,7 +352,11 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 		"event": evt,
 	})
 
-	if strings.TrimSpace(evt.RoomID) == "" || strings.TrimSpace(evt.Sender.ID) == "" {
+	roomID := resolvedRoomID(evt)
+	topicID := resolvedTopicID(evt)
+	chatID := topicChatID(roomID, topicID)
+
+	if strings.TrimSpace(roomID) == "" || strings.TrimSpace(evt.Sender.ID) == "" {
 		return
 	}
 
@@ -333,6 +365,9 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 	if strings.EqualFold(evt.ChatType, "group") {
 		peerKind = "group"
 		isMentioned := hasInboundBotAtMention(content, c.config.BotID)
+		if !isMentioned && hasInboundAtMention(content) {
+			return
+		}
 		content = normalizeInboundAtMentions(content)
 		shouldRespond, normalized := c.ShouldRespondInGroup(isMentioned, content)
 		if !shouldRespond {
@@ -352,22 +387,69 @@ func (c *Channel) handleInboundEvent(evt eventPayload) {
 	metadata := map[string]string{
 		"timestamp": evt.Timestamp,
 		"chat_type": evt.ChatType,
+		"room_id":   roomID,
 	}
 	if len(evt.Mentions) > 0 {
 		metadata["mentions"] = strings.Join(evt.Mentions, ",")
 	}
+	if topicID != "" {
+		metadata["topic_id"] = topicID
+		metadata["parent_peer_kind"] = "topic"
+		metadata["parent_peer_id"] = topicID
+	}
+	if strings.TrimSpace(evt.ThreadRootID) != "" {
+		metadata["thread_root_id"] = strings.TrimSpace(evt.ThreadRootID)
+	}
 
 	c.HandleMessage(
 		c.ctx,
-		bus.Peer{Kind: peerKind, ID: evt.RoomID},
+		bus.Peer{Kind: peerKind, ID: chatID},
 		evt.MessageID,
 		evt.Sender.ID,
-		evt.RoomID,
+		chatID,
 		content,
 		nil,
 		metadata,
 		senderInfo,
 	)
+}
+
+func resolvedRoomID(evt eventPayload) string {
+	if roomID := strings.TrimSpace(evt.RoomID); roomID != "" {
+		return roomID
+	}
+	if chatID := strings.TrimSpace(evt.ChatID); chatID != "" {
+		return chatID
+	}
+	return strings.TrimSpace(evt.Context.ChatID)
+}
+
+func resolvedTopicID(evt eventPayload) string {
+	if topicID := strings.TrimSpace(evt.Context.TopicID); topicID != "" {
+		return topicID
+	}
+	return strings.TrimSpace(evt.ThreadRootID)
+}
+
+func topicChatID(roomID, topicID string) string {
+	roomID = strings.TrimSpace(roomID)
+	topicID = strings.TrimSpace(topicID)
+	if roomID == "" || topicID == "" {
+		return roomID
+	}
+	return roomID + "/" + topicID
+}
+
+func splitTopicChatID(chatID string) (roomID, topicID string) {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return "", ""
+	}
+	idx := strings.LastIndex(chatID, "/")
+	if idx <= 0 || idx == len(chatID)-1 {
+		return chatID, ""
+	}
+	return strings.TrimSpace(chatID[:idx]), strings.TrimSpace(chatID[idx+1:])
 }
 
 func hasInboundBotAtMention(content, botID string) bool {
@@ -394,6 +476,14 @@ func hasInboundBotAtMention(content, botID string) bool {
 		}
 		searchFrom = start + end + 1
 	}
+}
+
+func hasInboundAtMention(content string) bool {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return false
+	}
+	return strings.Contains(content, `<at user_id="`)
 }
 
 func normalizeInboundAtMentions(content string) string {
