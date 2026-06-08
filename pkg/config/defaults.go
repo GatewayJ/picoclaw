@@ -69,10 +69,10 @@ func DefaultConfig() *Config {
 				UseMarkdownV2: false,
 			},
 			CSGClaw: CSGClawConfig{
-				Enabled:   false,
-				BaseURL:   "http://127.0.0.1:18080",
-				BotID:     "",
-				AllowFrom: FlexibleStringSlice{},
+				Enabled:       false,
+				BaseURL:       "http://127.0.0.1:18080",
+				ParticipantID: "",
+				AllowFrom:     FlexibleStringSlice{},
 			},
 			Feishu: FeishuConfig{
 				Enabled:   false,

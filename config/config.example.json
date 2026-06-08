@@ -94,7 +94,7 @@
     "csgclaw": {
       "enabled": false,
       "base_url": "http://127.0.0.1:18080",
-      "bot_id": "u-manager",
+      "participant_id": "manager",
       "access_token": "YOUR_CSGCLAW_ACCESS_TOKEN",
       "allow_from": [],
       "group_trigger": {

@@ -75,7 +75,11 @@ type feishuSSEMessage struct {
 	Mentions  []string `json:"mentions"`
 }
 
-func NewFeishuChannel(cfg config.FeishuConfig, csgclawCfg config.CSGClawConfig, bus *bus.MessageBus) (*FeishuChannel, error) {
+func NewFeishuChannel(
+	cfg config.FeishuConfig,
+	csgclawCfg config.CSGClawConfig,
+	bus *bus.MessageBus,
+) (*FeishuChannel, error) {
 	base := channels.NewBaseChannel("feishu", cfg, bus, cfg.AllowFrom,
 		channels.WithGroupTrigger(cfg.GroupTrigger),
 		channels.WithReasoningChannelID(cfg.ReasoningChannelID),
@@ -143,11 +147,14 @@ func (c *FeishuChannel) Start(ctx context.Context) error {
 	if c.hasCSGClawSSEConfig() {
 		go c.runCSGClawSSELoop(runCtx)
 		logger.InfoCF("feishu", "Feishu CSGClaw SSE listener started", map[string]any{
-			"base_url": c.csgclawConfig.BaseURL,
-			"bot_id":   c.csgclawConfig.BotID,
+			"base_url":       c.csgclawConfig.BaseURL,
+			"participant_id": c.csgclawConfig.ParticipantID,
 		})
 	} else if c.hasPartialCSGClawSSEConfig() {
-		logger.WarnC("feishu", "Feishu CSGClaw SSE listener disabled because base_url, bot_id, or access_token is missing")
+		logger.WarnC(
+			"feishu",
+			"Feishu CSGClaw SSE listener disabled because base_url, participant_id, or access_token is missing",
+		)
 	}
 
 	return nil
@@ -526,13 +533,13 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 
 func (c *FeishuChannel) hasCSGClawSSEConfig() bool {
 	return strings.TrimSpace(c.csgclawConfig.BaseURL) != "" &&
-		strings.TrimSpace(c.csgclawConfig.BotID) != "" &&
+		strings.TrimSpace(c.csgclawConfig.ParticipantID) != "" &&
 		strings.TrimSpace(c.csgclawConfig.AccessToken) != ""
 }
 
 func (c *FeishuChannel) hasPartialCSGClawSSEConfig() bool {
 	return strings.TrimSpace(c.csgclawConfig.BaseURL) != "" ||
-		strings.TrimSpace(c.csgclawConfig.BotID) != "" ||
+		strings.TrimSpace(c.csgclawConfig.ParticipantID) != "" ||
 		strings.TrimSpace(c.csgclawConfig.AccessToken) != ""
 }
 
@@ -746,8 +753,8 @@ func (c *FeishuChannel) feishuSSEPayloadToLarkEvent(payload feishuSSEPayload) (*
 
 func (c *FeishuChannel) csgclawFeishuEventsURL() string {
 	return strings.TrimRight(c.csgclawConfig.BaseURL, "/") +
-		"/api/v1/channels/feishu/bots/" +
-		url.PathEscape(c.csgclawConfig.BotID) +
+		"/api/v1/channels/feishu/participants/" +
+		url.PathEscape(c.csgclawConfig.ParticipantID) +
 		"/events"
 }
 

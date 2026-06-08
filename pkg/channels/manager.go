@@ -359,7 +359,7 @@ func (m *Manager) initChannels(channels *config.ChannelsConfig) error {
 
 	if channels.CSGClaw.Enabled &&
 		channels.CSGClaw.BaseURL != "" &&
-		channels.CSGClaw.BotID != "" &&
+		channels.CSGClaw.ParticipantID != "" &&
 		channels.CSGClaw.AccessToken != "" {
 		m.initChannel("csgclaw", "CSGClaw")
 	}

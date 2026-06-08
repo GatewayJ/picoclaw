@@ -285,8 +285,8 @@ func TestExtractFeishuSenderID(t *testing.T) {
 func TestFeishuSSEPayloadToLarkEvent(t *testing.T) {
 	ch := &FeishuChannel{
 		csgclawConfig: config.CSGClawConfig{
-			BaseURL: "https://csg.example.com/",
-			BotID:   "u-manager",
+			BaseURL:       "https://csg.example.com/",
+			ParticipantID: "u-manager",
 		},
 	}
 
@@ -329,7 +329,7 @@ func TestFeishuSSEPayloadToLarkEvent(t *testing.T) {
 	if got := stringValue(event.Event.Message.Mentions[0].Id.OpenId); got != "ou_2074" {
 		t.Fatalf("mention open id = %q, want ou_2074", got)
 	}
-	if got := ch.csgclawFeishuEventsURL(); got != "https://csg.example.com/api/v1/channels/feishu/bots/u-manager/events" {
+	if got := ch.csgclawFeishuEventsURL(); got != "https://csg.example.com/api/v1/channels/feishu/participants/u-manager/events" {
 		t.Fatalf("events url = %q", got)
 	}
 	if got, _ := ch.botOpenID.Load().(string); got != "ou_2074" {

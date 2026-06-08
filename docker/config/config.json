@@ -35,7 +35,7 @@
       "access_token": "your_access_token",
       "allow_from": [],
       "base_url": "http://127.0.0.1:18080",
-      "bot_id": "u-bot",
+      "participant_id": "manager",
       "enabled": true,
       "group_trigger": {
         "mention_only": true
