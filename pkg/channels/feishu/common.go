@@ -69,6 +69,78 @@ func extractFileKey(content string) string { return extractJSONStringField(conte
 // extractFileName extracts the file_name from a Feishu file message content JSON.
 func extractFileName(content string) string { return extractJSONStringField(content, "file_name") }
 
+// extractPostImageKeys extracts image_key values from Feishu rich text post content.
+// Format: {"title":"","content":[[{"tag":"img","image_key":"img_xxx"}]]}
+func extractPostImageKeys(content string) []string {
+	var payload struct {
+		Content [][]map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return nil
+	}
+
+	var keys []string
+	for _, line := range payload.Content {
+		for _, elem := range line {
+			if tag, _ := elem["tag"].(string); tag != "img" {
+				continue
+			}
+			if key, _ := elem["image_key"].(string); key != "" {
+				keys = append(keys, key)
+			}
+		}
+	}
+	return keys
+}
+
+// extractPostText flattens Feishu rich text post content into plain text.
+// It handles the small set of rich-text tags needed for inbound instructions;
+// image materialization is handled separately.
+func extractPostText(content string) string {
+	var payload struct {
+		Title   string             `json:"title"`
+		Content [][]map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return ""
+	}
+
+	var lines []string
+	if title := strings.TrimSpace(payload.Title); title != "" {
+		lines = append(lines, title)
+	}
+	for _, line := range payload.Content {
+		var b strings.Builder
+		for _, elem := range line {
+			switch tag, _ := elem["tag"].(string); tag {
+			case "text", "a":
+				b.WriteString(postStringField(elem, "text"))
+			case "at":
+				name := postStringField(elem, "user_name")
+				if name == "" {
+					name = postStringField(elem, "text")
+				}
+				if name != "" {
+					b.WriteString("@")
+					b.WriteString(name)
+				}
+			}
+		}
+		if text := strings.TrimSpace(b.String()); text != "" {
+			lines = append(lines, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func postStringField(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	value, _ := m[key].(string)
+	return value
+}
+
 // stripMentionPlaceholders removes @_user_N placeholders from the text content.
 // These are inserted by Feishu when users @mention someone in a message.
 func stripMentionPlaceholders(content string, mentions []*larkim.MentionEvent) string {

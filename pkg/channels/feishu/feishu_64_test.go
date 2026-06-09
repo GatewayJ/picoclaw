@@ -30,10 +30,10 @@ func TestExtractContent(t *testing.T) {
 			want:        "not json",
 		},
 		{
-			name:        "post message returns raw JSON",
+			name:        "post message returns flattened text",
 			messageType: "post",
 			rawContent:  `{"title": "test post"}`,
-			want:        `{"title": "test post"}`,
+			want:        "test post",
 		},
 		{
 			name:        "image message returns empty",

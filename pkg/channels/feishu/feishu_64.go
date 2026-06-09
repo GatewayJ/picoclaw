@@ -463,8 +463,9 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 
 	// Handle media messages (download and store)
 	var mediaRefs []string
+	var mediaFailures []string
 	if store := c.GetMediaStore(); store != nil && messageID != "" {
-		mediaRefs = c.downloadInboundMedia(ctx, chatID, messageID, messageType, rawContent, store)
+		mediaRefs, mediaFailures = c.downloadInboundMedia(ctx, chatID, messageID, messageType, rawContent, store)
 	}
 
 	// For interactive cards, pass external image URLs via media refs.
@@ -478,6 +479,7 @@ func (c *FeishuChannel) handleMessageReceive(ctx context.Context, event *larkim.
 
 	// Append media tags to content (like Telegram does)
 	content = appendMediaTags(content, messageType, mediaRefs)
+	content = appendAttachmentFailures(content, mediaFailures)
 
 	if content == "" {
 		content = "[empty message]"
@@ -859,8 +861,7 @@ func extractContent(messageType, rawContent string) string {
 		return rawContent
 
 	case larkim.MsgTypePost:
-		// Pass raw JSON to LLM — structured rich text is more informative than flattened plain text
-		return rawContent
+		return extractPostText(rawContent)
 
 	case larkim.MsgTypeInteractive:
 		// Pass raw JSON to LLM — structured card is more informative than flattened text
@@ -888,19 +889,32 @@ func (c *FeishuChannel) downloadInboundMedia(
 	ctx context.Context,
 	chatID, messageID, messageType, rawContent string,
 	store media.MediaStore,
-) []string {
+) ([]string, []string) {
 	var refs []string
+	var failures []string
 	scope := channels.BuildMediaScope("feishu", chatID, messageID)
 
 	switch messageType {
 	case larkim.MsgTypeImage:
 		imageKey := extractImageKey(rawContent)
 		if imageKey == "" {
-			return nil
+			return nil, nil
 		}
-		ref := c.downloadResource(ctx, messageID, imageKey, "image", ".jpg", store, scope)
+		ref, failure := c.downloadResource(ctx, messageID, imageKey, "image", ".jpg", store, scope)
 		if ref != "" {
 			refs = append(refs, ref)
+		} else if failure != "" {
+			failures = append(failures, failure)
+		}
+
+	case larkim.MsgTypePost:
+		for _, imageKey := range extractPostImageKeys(rawContent) {
+			ref, failure := c.downloadResource(ctx, messageID, imageKey, "image", ".jpg", store, scope)
+			if ref != "" {
+				refs = append(refs, ref)
+			} else if failure != "" {
+				failures = append(failures, failure)
+			}
 		}
 
 	case larkim.MsgTypeInteractive:
@@ -908,9 +922,11 @@ func (c *FeishuChannel) downloadInboundMedia(
 		feishuKeys, _ := extractCardImageKeys(rawContent)
 		// Download Feishu-hosted images via API
 		for _, imageKey := range feishuKeys {
-			ref := c.downloadResource(ctx, messageID, imageKey, "image", ".jpg", store, scope)
+			ref, failure := c.downloadResource(ctx, messageID, imageKey, "image", ".jpg", store, scope)
 			if ref != "" {
 				refs = append(refs, ref)
+			} else if failure != "" {
+				failures = append(failures, failure)
 			}
 		}
 		// External URLs are passed directly to LLM, not downloaded
@@ -918,7 +934,7 @@ func (c *FeishuChannel) downloadInboundMedia(
 	case larkim.MsgTypeFile, larkim.MsgTypeAudio, larkim.MsgTypeMedia:
 		fileKey := extractFileKey(rawContent)
 		if fileKey == "" {
-			return nil
+			return nil, nil
 		}
 		// Derive a fallback extension from the message type.
 		var ext string
@@ -930,13 +946,15 @@ func (c *FeishuChannel) downloadInboundMedia(
 		default:
 			ext = "" // generic file — rely on resp.FileName
 		}
-		ref := c.downloadResource(ctx, messageID, fileKey, "file", ext, store, scope)
+		ref, failure := c.downloadResource(ctx, messageID, fileKey, "file", ext, store, scope)
 		if ref != "" {
 			refs = append(refs, ref)
+		} else if failure != "" {
+			failures = append(failures, failure)
 		}
 	}
 
-	return refs
+	return refs, failures
 }
 
 // downloadResource downloads a message resource (image/file) from Feishu,
@@ -947,7 +965,7 @@ func (c *FeishuChannel) downloadResource(
 	messageID, fileKey, resourceType, fallbackExt string,
 	store media.MediaStore,
 	scope string,
-) string {
+) (string, string) {
 	req := larkim.NewGetMessageResourceReqBuilder().
 		MessageId(messageID).
 		FileKey(fileKey).
@@ -961,7 +979,7 @@ func (c *FeishuChannel) downloadResource(
 			"file_key":   fileKey,
 			"error":      err.Error(),
 		})
-		return ""
+		return "", mediaUnavailable(resourceType, fileKey, "download request failed")
 	}
 	if !resp.Success() {
 		c.invalidateTokenOnAuthError(resp.Code)
@@ -969,11 +987,11 @@ func (c *FeishuChannel) downloadResource(
 			"code": resp.Code,
 			"msg":  resp.Msg,
 		})
-		return ""
+		return "", mediaUnavailable(resourceType, fileKey, fmt.Sprintf("feishu resource API code=%d", resp.Code))
 	}
 
 	if resp.File == nil {
-		return ""
+		return "", mediaUnavailable(resourceType, fileKey, "empty resource response")
 	}
 	// Safely close the underlying reader if it implements io.Closer (e.g. HTTP response body).
 	if closer, ok := resp.File.(io.Closer); ok {
@@ -995,7 +1013,7 @@ func (c *FeishuChannel) downloadResource(
 		logger.ErrorCF("feishu", "Failed to create media directory", map[string]any{
 			"error": mkdirErr.Error(),
 		})
-		return ""
+		return "", mediaUnavailable(resourceType, fileKey, "local materialization failed")
 	}
 	ext := filepath.Ext(filename)
 	localPath := filepath.Join(mediaDir, utils.SanitizeFilename(messageID+"-"+fileKey+ext))
@@ -1005,7 +1023,7 @@ func (c *FeishuChannel) downloadResource(
 		logger.ErrorCF("feishu", "Failed to create local file for resource", map[string]any{
 			"error": err.Error(),
 		})
-		return ""
+		return "", mediaUnavailable(resourceType, fileKey, "local materialization failed")
 	}
 
 	if _, copyErr := io.Copy(out, resp.File); copyErr != nil {
@@ -1014,7 +1032,7 @@ func (c *FeishuChannel) downloadResource(
 		logger.ErrorCF("feishu", "Failed to write resource to file", map[string]any{
 			"error": copyErr.Error(),
 		})
-		return ""
+		return "", mediaUnavailable(resourceType, fileKey, "local materialization failed")
 	}
 	out.Close()
 
@@ -1029,10 +1047,25 @@ func (c *FeishuChannel) downloadResource(
 			"error":    err.Error(),
 		})
 		os.Remove(localPath)
-		return ""
+		return "", mediaUnavailable(resourceType, fileKey, "local materialization failed")
 	}
 
-	return ref
+	return ref, ""
+}
+
+func mediaUnavailable(resourceType, key, reason string) string {
+	resourceType = strings.TrimSpace(resourceType)
+	if resourceType == "" {
+		resourceType = "resource"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unavailable"
+	}
+	if key == "" {
+		return fmt.Sprintf("%s: unavailable (%s)", resourceType, reason)
+	}
+	return fmt.Sprintf("%s %s: unavailable (%s)", resourceType, key, reason)
 }
 
 // appendMediaTags appends media type tags to content (like Telegram's "[image: photo]").
@@ -1050,7 +1083,7 @@ func appendMediaTags(content, messageType string, mediaRefs []string) string {
 
 	var tag string
 	switch messageType {
-	case larkim.MsgTypeImage:
+	case larkim.MsgTypeImage, larkim.MsgTypePost:
 		tag = "[image: photo]"
 	case larkim.MsgTypeAudio:
 		tag = "[audio]"
@@ -1066,6 +1099,28 @@ func appendMediaTags(content, messageType string, mediaRefs []string) string {
 		return tag
 	}
 	return content + " " + tag
+}
+
+func appendAttachmentFailures(content string, failures []string) string {
+	if len(failures) == 0 {
+		return content
+	}
+
+	var b strings.Builder
+	if strings.TrimSpace(content) != "" {
+		b.WriteString(content)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Attachments:")
+	for _, failure := range failures {
+		failure = strings.TrimSpace(failure)
+		if failure == "" {
+			continue
+		}
+		b.WriteString("\n- ")
+		b.WriteString(failure)
+	}
+	return b.String()
 }
 
 // sendCard sends an interactive card message to a chat.

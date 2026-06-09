@@ -963,6 +963,45 @@ type artifactThenSendProvider struct {
 	calls int
 }
 
+func extractToolResultArtifactPath(content string) string {
+	prefixes := []string{"[image:", "[audio:", "[video:", "[file:"}
+	for _, prefix := range prefixes {
+		start := strings.Index(content, prefix)
+		if start < 0 {
+			continue
+		}
+
+		rest := content[start+len(prefix):]
+		end := strings.Index(rest, "]")
+		if end <= 0 {
+			continue
+		}
+
+		artifactPath := rest[:end]
+		if strings.TrimSpace(artifactPath) == "" {
+			continue
+		}
+		return artifactPath
+	}
+
+	return ""
+}
+
+func (m *artifactThenSendProvider) getArtifactPath(messages []providers.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "tool" {
+			continue
+		}
+
+		artifactPath := extractToolResultArtifactPath(messages[i].Content)
+		if artifactPath != "" {
+			return artifactPath
+		}
+	}
+
+	return ""
+}
+
 func (m *artifactThenSendProvider) Chat(
 	ctx context.Context,
 	messages []providers.Message,
@@ -983,23 +1022,7 @@ func (m *artifactThenSendProvider) Chat(
 		}, nil
 	}
 
-	var artifactPath string
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role != "tool" {
-			continue
-		}
-		start := strings.Index(messages[i].Content, "[file:")
-		if start < 0 {
-			continue
-		}
-		rest := messages[i].Content[start+len("[file:"):]
-		end := strings.Index(rest, "]")
-		if end < 0 {
-			continue
-		}
-		artifactPath = rest[:end]
-		break
-	}
+	artifactPath := m.getArtifactPath(messages)
 	if artifactPath == "" {
 		return nil, fmt.Errorf("provider did not receive artifact path in tool result")
 	}
@@ -2733,6 +2756,8 @@ func TestResolveMediaRefs_MixedImageAndFile(t *testing.T) {
 		t.Fatal("expected image to be base64 encoded")
 	}
 	expectedContent := "check these [file:" + pdfPath + "]"
+	expectedImageTag := "[image:" + pngPath + "]"
+	expectedContent += " " + expectedImageTag
 	if result[0].Content != expectedContent {
 		t.Fatalf("expected content %q, got %q", expectedContent, result[0].Content)
 	}

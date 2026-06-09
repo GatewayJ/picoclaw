@@ -144,6 +144,40 @@ func TestReleaseAllSharedPathDeletesOnFinalRefOnly(t *testing.T) {
 	}
 }
 
+func TestStoreOnExistingPathCanSwitchToForgetOnlyCleanupPolicy(t *testing.T) {
+	dir := t.TempDir()
+	store := NewFileMediaStore()
+
+	path := createTempFile(t, dir, "artifact.png")
+	ref, err := store.Store(path, MediaMeta{
+		Filename:      "artifact.png",
+		ContentType:   "image/png",
+		CleanupPolicy: CleanupPolicyDeleteOnCleanup,
+	}, "scope")
+	if err != nil {
+		t.Fatalf("Store initial delete policy failed: %v", err)
+	}
+
+	if _, err := store.Store(path, MediaMeta{
+		Filename:      "artifact.png",
+		ContentType:   "image/png",
+		CleanupPolicy: CleanupPolicyForgetOnly,
+	}, "scope"); err != nil {
+		t.Fatalf("Store existing path with forget-only policy failed: %v", err)
+	}
+
+	if err := store.ReleaseAll("scope"); err != nil {
+		t.Fatalf("ReleaseAll failed: %v", err)
+	}
+
+	if _, err := store.Resolve(ref); err == nil {
+		t.Fatalf("Resolve(%q) should fail after ReleaseAll", ref)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("forget-only updated policy should keep file in scope: %v", err)
+	}
+}
+
 func TestReleaseAllMixedPoliciesKeepsFile(t *testing.T) {
 	dir := t.TempDir()
 	store := NewFileMediaStore()

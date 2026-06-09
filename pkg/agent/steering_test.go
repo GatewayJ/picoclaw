@@ -1087,10 +1087,17 @@ func TestAgentLoop_Continue_PreservesSteeringMedia(t *testing.T) {
 
 	foundResolvedMedia := false
 	for _, msg := range msgs {
-		if msg.Role != "user" || msg.Content != "describe this image" || len(msg.Media) != 1 {
+		if msg.Role != "user" || len(msg.Media) != 1 {
 			continue
 		}
-		if strings.HasPrefix(msg.Media[0], "data:image/png;base64,") {
+		if strings.HasPrefix(msg.Content, "describe this image") &&
+			strings.HasPrefix(msg.Media[0], "data:image/png;base64,") {
+			foundResolvedMedia = true
+			break
+		}
+
+		wantTag := "[image:" + pngPath + "]"
+		if strings.Contains(msg.Content, wantTag) {
 			foundResolvedMedia = true
 			break
 		}

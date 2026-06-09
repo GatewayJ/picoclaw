@@ -1675,7 +1675,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 	if !ts.opts.NoHistory && (strings.TrimSpace(ts.userMessage) != "" || len(ts.media) > 0) {
 		rootMsg := providers.Message{
 			Role:    "user",
-			Content: ts.userMessage,
+			Content: resolvedCurrentUserMessageContent(messages, ts.userMessage),
 			Media:   append([]string(nil), ts.media...),
 		}
 		if len(rootMsg.Media) > 0 {

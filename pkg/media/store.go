@@ -125,6 +125,25 @@ func (s *FileMediaStore) Store(localPath string, meta MediaMeta, scope string) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	for existingRef, entry := range s.refs {
+		if entry.path == localPath && s.refToScope[existingRef] == scope {
+			entry.meta = meta
+			entry.storedAt = s.nowFunc()
+			s.refs[existingRef] = entry
+
+			pathState := s.pathStates[localPath]
+			if pathState.refCount <= 0 {
+				pathState.refCount = 1
+			}
+			if meta.CleanupPolicy == CleanupPolicyForgetOnly {
+				pathState.deleteEligible = false
+			}
+			s.pathStates[localPath] = pathState
+
+			return existingRef, nil
+		}
+	}
+
 	s.refs[ref] = mediaEntry{path: localPath, meta: meta, storedAt: s.nowFunc()}
 	if s.scopeToRefs[scope] == nil {
 		s.scopeToRefs[scope] = make(map[string]struct{})
